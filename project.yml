@@ -45,6 +45,7 @@ targets:
       - path: app/App.swift
       - path: app/app.js
       - path: app/app.bundle
+      - path: app/WebRTCManager.swift
         optional: true
 
     scheme:
