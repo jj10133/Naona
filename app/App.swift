@@ -1,44 +1,31 @@
+// App.swift
+
 import BareKit
 import SwiftUI
-import WebRTC
+
+// MARK: - App
 
 @main
 struct App: SwiftUI.App {
-    
-    private var worklet = Worklet()
-    @State private var isWorkletStarted = false
-    
+
+    @StateObject private var worker = Worker()
+    @StateObject private var router = AppRouter()
+    @State private var isStarted = false
     @Environment(\.scenePhase) private var scenePhase
-    
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .onAppear {
-                    worklet.start(name: "app", ofType: "bundle")
-                    isWorkletStarted = true
-                }
-                .onDisappear {
-                    worklet.terminate()
-                }
+            RootView(router: router, worker: worker)
+                .onAppear { worker.start(); isStarted = true }
+                .onDisappear { worker.terminate() }
         }
         .onChange(of: scenePhase) { phase in
-            guard isWorkletStarted else { return }
-            
+            guard isStarted else { return }
             switch phase {
-            case .background:
-                worklet.suspend()
-            case .active:
-                worklet.resume()
-            default:
-                break
+            case .background: worker.suspend()
+            case .active:     worker.resume()
+            default: break
             }
         }
     }
 }
-
-struct ContentView: View {
-    var body: some View {
-        Text("Hello SwiftUI!")
-    }
-}
-
