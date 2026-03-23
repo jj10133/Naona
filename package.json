@@ -17,9 +17,14 @@
   },
   "homepage": "https://github.com/holepunchto/bare-ios#readme",
   "devDependencies": {
-    "bare-link": "^1.2.0",
-    "bare-pack": "^1.3.0",
+    "bare-link": "^3.0.2",
+    "bare-pack": "^2.0.1",
     "prettier": "^3.4.2",
     "prettier-config-holepunch": "^2.0.0"
+  },
+  "dependencies": {
+    "b4a": "^1.8.0",
+    "hyperswarm": "^4.17.0",
+    "streamx": "^2.25.0"
   }
 }
