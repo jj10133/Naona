@@ -1,76 +1,147 @@
 name: App
-
 include:
   - app/addons/addons.yml
-
 packages:
   BareKit:
     url: https://github.com/holepunchto/bare-kit-swift
     branch: main
-
   WebRTC:
     url: https://github.com/stasel/WebRTC
     branch: release-M137
-
 targets:
   App:
     type: application
-    supportedDestinations: [iOS, macOS]
+    supportedDestinations: [macOS]
     deploymentTarget:
       iOS: 18.4
       macOS: 15.0
-
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: to.holepunch.bare.ios
         SWIFT_VERSION: 5.0
 
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: '-'
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGNING_ALLOWED: NO
+          VALIDATE_PRODUCT: NO
+          VALIDATE_WORKSPACE: NO
+          OTHER_CODE_SIGN_FLAGS: '--deep --no-strict'
+        Release:
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGN_IDENTITY: 'Apple Development'
+          CODE_SIGNING_REQUIRED: YES
+          VALIDATE_PRODUCT: YES
     info:
       path: app/Info.plist
-
     entitlements:
       path: app/App.entitlements
       properties:
-        #com.apple.security.application-groups:
-        # - group.to.holepunch.bare.ios
         com.apple.security.cs.allow-jit: true
-
     dependencies:
       - framework: app/frameworks/BareKit.xcframework
       - package: BareKit
       - package: WebRTC
         product: WebRTC
-
     sources:
       - path: app/App.swift
-      - path: app/app.js
       - path: app/app.bundle
-      - path: app/WebRTCManager.swift
-        optional: true
 
+      - path: app/js/app.js
+        group: app/js
+
+      - path: app/Core/Domain/WebRTCManager.swift
+        group: app/Core/Domain
+      - path: app/Core/Domain/PeerSession.swift
+
+      - path: app/Core/Helper/CallState.swift
+        group: app/Core/Helper
+
+      - path: app/Core/IPC/BareKitBridge.swift
+        group: app/Core/IPC
+      - path: app/Core/IPC/Worker.swift
+
+      - path: app/Core/Home/View/LobbyView.swift
+        group: app/Core/Home/View
+      - path: app/Core/Home/View/VideoCallView.swift
+
+      - path: app/Core/Home/ViewModel/CallViewModel.swift
+        group: app/Core/Home/ViewModel
+
+      - path: app/Core/Root/AppRouter.swift
+        group: app/Core/Root
+      - path: app/Core/Root/RootView.swift
+
+        optional: true
     scheme:
       preActions:
         - name: Link & Pack
           script: |
-            case "$PLATFORM_NAME" in
+            set -eu
+
+            export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+
+            [ -x "/opt/homebrew/bin/brew" ] && eval "$(/opt/homebrew/bin/brew shellenv)"
+            [ -x "/usr/local/bin/brew" ]    && eval "$(/usr/local/bin/brew shellenv)"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
+            [ -d "$HOME/.volta/bin" ] && export PATH="$HOME/.volta/bin:$PATH"
+            command -v fnm &>/dev/null && eval "$(fnm env)"
+            export PATH="/usr/local/bin:$PATH"
+
+            if ! command -v node &>/dev/null; then
+              echo "error: 'node' not found." >&2; exit 1
+            fi
+            echo "node $(node --version) at $(which node)"
+
+            mkdir -p "${PWD}/app/addons"
+
+            # Generate a safe empty addons.yml first so xcodegen never fails on
+            # a clean checkout. bare-link will overwrite it for iOS builds.
+            if [ ! -f "${PWD}/app/addons/addons.yml" ]; then
+              printf "configs:\n  base: {}\n" > "${PWD}/app/addons/addons.yml"
+            fi
+
+            # Only run bare-link (and embed addons) for iOS builds.
+            # macOS has no published native addon slices — skip it entirely.
+            case "${PLATFORM_NAME:-}" in
               iphoneos|iphonesimulator)
-                PRESET=ios
+                echo "bare-link: ios…"
+                "${PWD}/node_modules/.bin/bare-link" \
+                  --preset ios \
+                  --out    "${PWD}/app/addons" \
+                  "${PWD}"
+
+                echo "Signing xcframeworks…"
+                find "${PWD}/app/addons" -name "*.xcframework" | while read -r fw; do
+                  find "$fw" \( -name "*.framework" -o -name "*.dylib" -o -name "*.a" \) \
+                    | while read -r inner; do
+                        codesign --force --sign - "$inner" 2>/dev/null || true
+                      done
+                  codesign --force --sign - "$fw" 2>/dev/null || true
+                  echo "  signed: $(basename "$fw")"
+                done
+
+                PACK_PRESET=ios
                 ;;
               macosx)
-                PRESET=darwin
+                echo "macOS build — skipping bare-link (no macOS addon slices published)"
+                # Write an empty addons.yml so the include doesn't break xcodegen
+                printf "configs:\n  base: {}\n" > "${PWD}/app/addons/addons.yml"
+                PACK_PRESET=darwin
                 ;;
               *)
-                PRESET=ios
+                PACK_PRESET=ios
                 ;;
             esac
 
-            PATH="${PATH}" "${PWD}/node_modules/.bin/bare-link" \
-              --preset ${PRESET} \
-              --out ${PWD}/app/addons \
-              ${PWD}
+            echo "bare-pack: ${PACK_PRESET}…"
+            "${PWD}/node_modules/.bin/bare-pack" \
+              --preset "${PACK_PRESET}" \
+              --base   "${PWD}" \
+              --out    "${PWD}/app/app.bundle" \
+              "${PWD}/app/js/app.js"
 
-            PATH="${PATH}" "${PWD}/node_modules/.bin/bare-pack" \
-              --preset ${PRESET} \
-              --base ${PWD} \
-              --out ${PWD}/app/app.bundle \
-              ${PWD}/app/app.js
+            echo "Link & Pack complete."
