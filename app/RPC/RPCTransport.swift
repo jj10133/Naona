@@ -1,64 +1,69 @@
 // RPC/RPCTransport.swift
-// BareKit IPC is an AsyncSequence — iterate with for await to receive chunks.
+// Raw IPC protocol matching lib/rpc.js exactly.
+// Every message: [1B command][4B data-length LE][N bytes data]
+// No bare-rpc framing — BareKit IPC preserves write boundaries.
 
 import BareKit
-import BareRPC
 import Foundation
+
+typealias IPCMessageHandler = (_ command: UInt8, _ data: Data) -> Void
 
 final class RPCTransport {
 
-    let rpc: RPC
+    var onMessage: IPCMessageHandler?
 
-    private let ipc:         IPC
-    private let ipcDelegate: _IPCDelegate
-    private var readTask:    Task<Void, Never>?
+    private let ipc:      IPC
+    private var readBuf   = Data()
+    private var readTask: Task<Void, Never>?
 
     init(ipc: IPC) {
-        self.ipc         = ipc
-        self.ipcDelegate = _IPCDelegate(ipc: ipc)
-        self.rpc         = RPC(delegate: ipcDelegate)
+        self.ipc = ipc
     }
 
     func start() {
         readTask = Task { [weak self] in
             guard let self else { return }
-            var count = 0
             do {
                 for try await chunk in self.ipc {
-                    count += 1
-                    if count <= 5 || count % 100 == 0 {
-                        print("[RPCTransport] rx chunk #\(count) bytes:\(chunk.count)")
-                    }
-                    self.rpc.receive(chunk)
+                    self.feed(chunk)
                 }
-                print("[RPCTransport] read loop ended normally after \(count) chunks")
             } catch {
-                print("[RPCTransport] read loop error after \(count) chunks: \(error)")
+                print("[RPCTransport] IPC ended: \(error)")
             }
         }
-        print("[RPCTransport] started, waiting for IPC data")
+        print("[RPCTransport] started")
     }
 
     func stop() {
         readTask?.cancel()
         readTask = nil
     }
-}
 
-// MARK: - Outbound: RPC → IPC
-
-private final class _IPCDelegate: RPCDelegate {
-    private let ipc: IPC
-
-    init(ipc: IPC) { self.ipc = ipc }
-
-    func rpc(_ rpc: RPC, send data: Data) {
+    // Send: [1B cmd][4B len LE][data]
+    func send(command: UInt8, data: Data = Data()) {
+        var msg = Data(count: 5 + data.count)
+        msg[0] = command
+        let len = UInt32(data.count).littleEndian
+        withUnsafeBytes(of: len) { msg.replaceSubrange(1..<5, with: $0) }
+        if !data.isEmpty { msg.replaceSubrange(5..., with: data) }
         Task {
-            do {
-                try await self.ipc.write(data: data)
-            } catch {
-                print("[RPCTransport] IPC write error: \(error)")
-            }
+            do { try await ipc.write(data: msg) }
+            catch { print("[RPCTransport] write error: \(error)") }
+        }
+    }
+
+    // Feed incoming bytes, parse complete messages
+    private func feed(_ chunk: Data) {
+        readBuf.append(chunk)
+        while readBuf.count >= 5 {
+            let cmd     = readBuf[0]
+            let dataLen = Int(readBuf[1..<5].withUnsafeBytes {
+                $0.loadUnaligned(as: UInt32.self).littleEndian
+            })
+            guard readBuf.count >= 5 + dataLen else { break }
+            let payload = readBuf.subdata(in: 5..<(5 + dataLen))
+            readBuf.removeSubrange(0..<(5 + dataLen))
+            onMessage?(cmd, payload)
         }
     }
 }
