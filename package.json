@@ -24,7 +24,11 @@
   },
   "dependencies": {
     "b4a": "^1.8.0",
+    "bare-ffmpeg": "^1.2.2",
+    "bare-rpc": "^1.2.0",
+    "compact-encoding": "^2.19.2",
+    "corestore": "^7.9.2",
     "hyperswarm": "^4.17.0",
-    "streamx": "^2.25.0"
+    "protomux": "^3.10.1"
   }
 }
