@@ -89,7 +89,12 @@ function _setupCapture () {
       console.warn('[capture] avfoundation failed with url:', url, '-', e.message)
     }
   }
-  if (!opened) throw new Error('[capture] could not open any avfoundation device')
+  if (!opened) {
+    throw new Error(
+      '[capture] could not open avfoundation — camera/mic may be in use by another app or instance. ' +
+      'On macOS, only one process can use the camera at a time.'
+    )
+  }
 }
 
 function _setupEncoders () {

@@ -75,9 +75,21 @@ async function _handleStart (req) {
     throw new Error('invalid JSON in start payload')
   }
 
-  await swarm.join(topic)
-  await capture.start()
+  try {
+    await swarm.join(topic)
+  } catch (e) {
+    console.error('[rpc] swarm.join failed:', e.message)
+    throw e
+  }
 
+  try {
+    await capture.start()
+  } catch (e) {
+    console.error('[rpc] capture.start failed:', e.message)
+    throw e
+  }
+
+  console.log('[rpc] start complete')
   req.reply(Buffer.from(JSON.stringify({ ok: true })))
 }
 
