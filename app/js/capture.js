@@ -98,21 +98,18 @@ function _setupCapture () {
 }
 
 function _setupEncoders () {
-  // VP8 software encoder — accepts CPU frames directly from avfoundation.
-  // Available in this bare-ffmpeg build. Decoder 'vp8' also available.
-  // VideoToolbox H264 requires HW frames (hwFramesCtx) which avfoundation
-  // CPU capture doesn't provide — VP8 works without any HW setup.
-  _encodeVideo = new ffmpeg.CodecContext(new ffmpeg.Encoder('libvpx'))
+  // H264 via VideoToolbox hardware encoder.
+  // Input: YUV420P (converted from NV12 via Scaler).
+  // VideoToolbox accepts CPU YUV420P frames — no hwFramesCtx needed when
+  // using Codec.H264.encoder (not the 'h264_videotoolbox' string name).
+  _encodeVideo = new ffmpeg.CodecContext(ffmpeg.Codec.H264.encoder)
   _encodeVideo.width       = VIDEO_W
   _encodeVideo.height      = VIDEO_H
   _encodeVideo.frameRate   = new ffmpeg.Rational(VIDEO_FPS, 1)
   _encodeVideo.timeBase    = new ffmpeg.Rational(1, VIDEO_FPS)
   _encodeVideo.pixelFormat = ffmpeg.constants.pixelFormats.YUV420P
-  _encodeVideo.bitRate     = 1_000_000
+  _encodeVideo.bitRate     = 1_500_000
   _encodeVideo.gopSize     = VIDEO_FPS
-  // VP8 quality/speed tradeoff — deadline=1 = realtime
-  _encodeVideo.setOption('deadline', 'realtime')
-  _encodeVideo.setOption('cpu-used', '8')
   _encodeVideo.open()
 
   // Opus audio
