@@ -1,12 +1,11 @@
 'use strict'
 
-const { IPC } = BareKit
 const rpc     = require('./rpc')
 const capture = require('./capture')
 const swarm   = require('./swarm')
 const peers   = require('./peers')
 
-rpc.init(IPC)
+rpc.init(BareKit.IPC)
 
 Bare.on('suspend', () => console.log('[app] suspended'))
 Bare.on('resume',  () => console.log('[app] resumed'))

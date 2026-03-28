@@ -21,9 +21,9 @@ const CMD = {
 let _rpc = null
 
 function init (ipc) {
-  const stream = _wrapIPC(ipc)
-
-  _rpc = new RPC(stream, (req) => {
+  // IPC is already a streamx duplex stream — pass directly to bare-rpc.
+  // No wrapper needed. bare-rpc handles framing internally.
+  _rpc = new RPC(ipc, (req) => {
     switch (req.command) {
       case CMD.START: return _handleStart(req)
       case CMD.STOP:
@@ -113,20 +113,6 @@ function _handleMute (data) {
 
 function _jsonEvent (command, obj) {
   _rpc?.event(command, Buffer.from(JSON.stringify(obj)))
-}
-
-function _wrapIPC (ipc) {
-  const handlers = {}
-  const stream = {
-    on (event, fn) { handlers[event] = fn; return this },
-    write (data) {
-      try { ipc.write(data); return true }
-      catch (e) { console.error('[rpc] ipc write error:', e.message); return false }
-    }
-  }
-  ipc.on('data',  (chunk) => handlers['data']?.(chunk))
-  ipc.on('error', (err)   => console.error('[rpc] ipc error:', err.message))
-  return stream
 }
 
 module.exports = { init, CMD }
