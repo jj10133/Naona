@@ -1,25 +1,26 @@
-//
-//  LobbyView.swift
-//  App
-//
-//  Created by Janardhan on 2026-03-27.
-//
-
-
 // Views/LobbyView.swift
+// Room code UX — user types a short human-readable code (e.g. "TIGER-7")
+// which is SHA256-hashed to 32 bytes to form the Hyperswarm topic.
+// Both peers must type the same code → same topic → they find each other.
 
 import SwiftUI
+import CryptoKit
 
 struct LobbyView: View {
 
     var onStart: (_ topic: String, _ mode: CallMode) -> Void
 
-    @State private var topic = ""
+    @State private var roomCode  = ""
     @State private var mode: CallMode = .one
     @FocusState private var fieldFocused: Bool
 
-    private var isValid: Bool {
-        topic.count == 64 && topic.allSatisfy(\.isHexDigit)
+    private var isValid: Bool { roomCode.trimmingCharacters(in: .whitespaces).count >= 3 }
+
+    // SHA256 the room code → 64-char hex topic for Hyperswarm
+    private var topic: String {
+        let input = roomCode.trimmingCharacters(in: .whitespaces).lowercased()
+        let hash  = SHA256.hash(data: Data(input.utf8))
+        return hash.map { String(format: "%02x", $0) }.joined()
     }
 
     var body: some View {
@@ -67,8 +68,11 @@ struct LobbyView: View {
     private var inputCard: some View {
         VStack(spacing: 16) {
             modePicker
-            topicField
-            generateButton
+            roomCodeField
+            HStack(spacing: 12) {
+                generateButton
+                if isValid { copyButton }
+            }
             startButton
         }
         .padding(24)
@@ -107,19 +111,19 @@ struct LobbyView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Topic field
+    // MARK: - Room code field
 
-    private var topicField: some View {
+    private var roomCodeField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Join Code")
+            Text("Room Code")
                 .font(.caption.weight(.semibold))
                 .foregroundColor(.white.opacity(0.5))
                 .textCase(.uppercase)
                 .tracking(1)
 
             HStack {
-                TextField("Paste 64-char hex key…", text: $topic)
-                    .font(.system(.footnote, design: .monospaced))
+                TextField("e.g. tiger-7 or any word…", text: $roomCode)
+                    .font(.system(.body, design: .rounded))
                     .foregroundColor(.white)
                     .focused($fieldFocused)
                     .autocorrectionDisabled()
@@ -128,8 +132,8 @@ struct LobbyView: View {
                     .keyboardType(.asciiCapable)
                     #endif
 
-                if !topic.isEmpty {
-                    Button { topic = "" } label: {
+                if !roomCode.isEmpty {
+                    Button { roomCode = "" } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.white.opacity(0.3))
                     }
@@ -146,16 +150,38 @@ struct LobbyView: View {
                         lineWidth: 1
                     )
             )
+
+            if isValid {
+                Text("Topic: \(topic.prefix(16))…")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.3))
+            }
         }
     }
 
     private var generateButton: some View {
         Button {
-            topic = _randomTopic()
+            roomCode = _randomCode()
         } label: {
-            Label("Generate new code", systemImage: "arrow.clockwise")
+            Label("Generate", systemImage: "arrow.clockwise")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var copyButton: some View {
+        Button {
+            #if os(iOS)
+            UIPasteboard.general.string = roomCode
+            #elseif os(macOS)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(roomCode, forType: .string)
+            #endif
+        } label: {
+            Label("Copy code", systemImage: "doc.on.doc")
+                .font(.caption)
+                .foregroundColor(.green.opacity(0.8))
         }
         .buttonStyle(.plain)
     }
@@ -188,9 +214,10 @@ struct LobbyView: View {
 
     // MARK: - Helpers
 
-    private func _randomTopic() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
-        return bytes.map { String(format: "%02x", $0) }.joined()
+    private func _randomCode() -> String {
+        let words = ["tiger", "river", "storm", "echo", "frost", "lunar", "swift", "delta", "nova", "prism"]
+        let word  = words.randomElement() ?? "hello"
+        let num   = Int.random(in: 10...99)
+        return "\(word)-\(num)"
     }
 }
