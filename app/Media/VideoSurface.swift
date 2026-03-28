@@ -15,7 +15,7 @@ typealias PlatformView = NSView
 
 final class VideoSurface: PlatformView {
 
-    private let displayLayer   = AVSampleBufferDisplayLayer()
+    let displayLayer   = AVSampleBufferDisplayLayer()
     private var decomSession:   VTDecompressionSession?
     private var formatDesc:     CMVideoFormatDescription?
     private let WIDTH:  Int32  = 1280
