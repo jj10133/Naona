@@ -1,11 +1,9 @@
 // Media/VideoSurface.swift
-// Renders VP8 video packets via AVSampleBufferDisplayLayer.
-// VP8 is natively supported by Apple's VideoToolbox on macOS 11+ / iOS 14+.
-// No NAL parsing needed — VP8 packets feed directly into CMSampleBuffer.
+// Decodes VP8 via VTDecompressionSession and displays via AVSampleBufferDisplayLayer.
 
 import AVFoundation
-import CoreMedia
 import VideoToolbox
+import CoreMedia
 
 #if os(iOS)
 import UIKit
@@ -17,21 +15,23 @@ typealias PlatformView = NSView
 
 final class VideoSurface: PlatformView {
 
-    private let displayLayer = AVSampleBufferDisplayLayer()
-    private var formatDesc:   CMVideoFormatDescription?
-    private var frameCount:   Int64 = 0
+    private let displayLayer   = AVSampleBufferDisplayLayer()
+    private var decomSession:   VTDecompressionSession?
+    private var formatDesc:     CMVideoFormatDescription?
+    private let WIDTH:  Int32  = 1280
+    private let HEIGHT: Int32  = 720
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         _setup()
+        _buildFormatAndSession()
     }
-
     required init?(coder: NSCoder) { fatalError() }
 
-    // MARK: - Feed encoded VP8 packet
+    // MARK: - Feed VP8 packet
 
     func enqueue(h264 pts: UInt32, data: Data) {
-        _enqueueVP8(pts: pts, data: data)
+        _decodeAndDisplay(pts: pts, data: data)
     }
 
     // MARK: - Setup
@@ -46,9 +46,6 @@ final class VideoSurface: PlatformView {
         layer?.backgroundColor = NSColor.black.cgColor
         #endif
         displayLayer.videoGravity = .resizeAspectFill
-
-        // Build format description for VP8 1280x720
-        _buildFormatDescription(width: 1280, height: 720)
     }
 
     #if os(iOS)
@@ -63,57 +60,98 @@ final class VideoSurface: PlatformView {
     }
     #endif
 
-    // MARK: - Format description
+    // MARK: - VP8 format description + decompression session
 
-    private func _buildFormatDescription(width: Int32, height: Int32) {
-        // VP8 format description — kCMVideoCodecType_VP8 = 'vp08'
-        let vp8CodecType: CMVideoCodecType = 0x76703038  // 'vp08'
-        CMVideoFormatDescriptionCreate(
-            allocator: nil,
-            codecType: vp8CodecType,
-            width: width,
-            height: height,
-            extensions: nil,
-            formatDescriptionOut: &formatDesc
+    private func _buildFormatAndSession() {
+        // VP8 codec type: 'vp08'
+        let vp8: CMVideoCodecType = 0x76703038
+
+        // Create format description for VP8 1280x720
+        var fmtDesc: CMVideoFormatDescription?
+        let fmtStatus = CMVideoFormatDescriptionCreate(
+            allocator:          nil,
+            codecType:          vp8,
+            width:              WIDTH,
+            height:             HEIGHT,
+            extensions:         nil,
+            formatDescriptionOut: &fmtDesc
         )
+        guard fmtStatus == noErr, let fmtDesc else {
+            print("[VideoSurface] failed to create VP8 format desc: \(fmtStatus)")
+            return
+        }
+        self.formatDesc = fmtDesc
+
+        // Destination pixel format: 32BGRA for display
+        let destFmt: OSType = kCVPixelFormatType_32BGRA
+        let destAttrs = [
+            kCVPixelBufferPixelFormatTypeKey: destFmt,
+            kCVPixelBufferWidthKey:           WIDTH,
+            kCVPixelBufferHeightKey:          HEIGHT,
+            kCVPixelBufferMetalCompatibilityKey: true
+        ] as CFDictionary
+
+        var outputCallback = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: _decompressionCallback,
+            decompressionOutputRefCon:   Unmanaged.passUnretained(self).toOpaque()
+        )
+
+        var session: VTDecompressionSession?
+        let sessionStatus = VTDecompressionSessionCreate(
+            allocator:                  nil,
+            formatDescription:          fmtDesc,
+            decoderSpecification:       nil,
+            imageBufferAttributes:      destAttrs,
+            outputCallback:             &outputCallback,
+            decompressionSessionOut:    &session
+        )
+
+        if sessionStatus == noErr, let session {
+            self.decomSession = session
+            print("[VideoSurface] VP8 VTDecompressionSession ready")
+        } else {
+            print("[VideoSurface] VTDecompressionSession failed: \(sessionStatus)")
+            // Fallback: try direct enqueue to displayLayer (may work on some OS versions)
+        }
     }
 
-    // MARK: - Enqueue VP8 packet
+    // MARK: - Decode and display
 
-    private func _enqueueVP8(pts: UInt32, data: Data) {
+    private func _decodeAndDisplay(pts: UInt32, data: Data) {
         guard let formatDesc else { return }
         guard !data.isEmpty else { return }
 
-        var blockBuffer: CMBlockBuffer?
-        var dataCopy = data   // local copy for exclusive mutable access
-        let dataLen  = dataCopy.count
+        // Build CMSampleBuffer from raw VP8 packet
+        var dataCopy  = data
+        let dataLen   = dataCopy.count
+        var blockBuf: CMBlockBuffer?
 
         dataCopy.withUnsafeMutableBytes { ptr in
             CMBlockBufferCreateWithMemoryBlock(
-                allocator:        nil,
-                memoryBlock:      ptr.baseAddress,
-                blockLength:      dataLen,
-                blockAllocator:   kCFAllocatorNull,
-                customBlockSource: nil,
-                offsetToData:     0,
-                dataLength:       dataLen,
-                flags:            0,
-                blockBufferOut:   &blockBuffer
+                allocator:          nil,
+                memoryBlock:        ptr.baseAddress,
+                blockLength:        dataLen,
+                blockAllocator:     kCFAllocatorNull,
+                customBlockSource:  nil,
+                offsetToData:       0,
+                dataLength:         dataLen,
+                flags:              0,
+                blockBufferOut:     &blockBuf
             )
         }
-        guard let blockBuffer else { return }
+        guard let blockBuf else { return }
 
         let ptsTime = CMTime(value: CMTimeValue(pts), timescale: 1000)
         var timing  = CMSampleTimingInfo(
-            duration:               CMTime(value: 1, timescale: CMTimeScale(30)),
+            duration:               CMTime(value: 1, timescale: 30),
             presentationTimeStamp:  ptsTime,
             decodeTimeStamp:        .invalid
         )
         var sampleSize = dataLen
-        var sampleBuffer: CMSampleBuffer?
+        var sampleBuf: CMSampleBuffer?
         CMSampleBufferCreate(
             allocator:              nil,
-            dataBuffer:             blockBuffer,
+            dataBuffer:             blockBuf,
             dataReady:              true,
             makeDataReadyCallback:  nil,
             refcon:                 nil,
@@ -123,24 +161,77 @@ final class VideoSurface: PlatformView {
             sampleTimingArray:      &timing,
             sampleSizeEntryCount:   1,
             sampleSizeArray:        &sampleSize,
-            sampleBufferOut:        &sampleBuffer
+            sampleBufferOut:        &sampleBuf
         )
-        guard let sampleBuffer else { return }
+        guard let sampleBuf else { return }
 
-        // Mark as ready to display
-        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true)
-        if let attachments, CFArrayGetCount(attachments) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict,
-                Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+        if let session = decomSession {
+            // Decode via VTDecompressionSession
+            var infoFlags = VTDecodeInfoFlags(rawValue: 0)
+            VTDecompressionSessionDecodeFrame(
+                session,
+                sampleBuffer:    sampleBuf,
+                flags:           [._EnableAsynchronousDecompression],
+                frameRefcon:     nil,
+                infoFlagsOut:    &infoFlags
             )
-        }
-
-        if displayLayer.isReadyForMoreMediaData {
-            displayLayer.enqueue(sampleBuffer)
         } else {
-            displayLayer.flush()
+            // Fallback: enqueue directly to displayLayer
+            if displayLayer.isReadyForMoreMediaData {
+                displayLayer.enqueue(sampleBuf)
+            }
+        }
+    }
+}
+
+// MARK: - VTDecompressionSession callback (C function)
+
+private func _decompressionCallback(
+    decompressionOutputRefCon: UnsafeMutableRawPointer?,
+    sourceFrameRefCon:         UnsafeMutableRawPointer?,
+    status:                    OSStatus,
+    infoFlags:                 VTDecodeInfoFlags,
+    imageBuffer:               CVImageBuffer?,
+    presentationTimeStamp:     CMTime,
+    presentationDuration:      CMTime
+) {
+    guard status == noErr, let imageBuffer,
+          let refCon = decompressionOutputRefCon else {
+        if status != noErr { print("[VideoSurface] decode error: \(status)") }
+        return
+    }
+
+    let surface = Unmanaged<VideoSurface>.fromOpaque(refCon).takeUnretainedValue()
+
+    // Convert CVPixelBuffer → CMSampleBuffer for AVSampleBufferDisplayLayer
+    var timingInfo = CMSampleTimingInfo(
+        duration:               CMTime(value: 1, timescale: 30),
+        presentationTimeStamp:  presentationTimeStamp,
+        decodeTimeStamp:        .invalid
+    )
+    var formatDesc: CMVideoFormatDescription?
+    CMVideoFormatDescriptionCreateForImageBuffer(
+        allocator:              nil,
+        imageBuffer:            imageBuffer,
+        formatDescriptionOut:   &formatDesc
+    )
+    guard let formatDesc else { return }
+
+    var sampleBuf: CMSampleBuffer?
+    CMSampleBufferCreateReadyWithImageBuffer(
+        allocator:              nil,
+        imageBuffer:            imageBuffer,
+        formatDescription:      formatDesc,
+        sampleTiming:           &timingInfo,
+        sampleBufferOut:        &sampleBuf
+    )
+    guard let sampleBuf else { return }
+
+    DispatchQueue.main.async {
+        if surface.displayLayer.isReadyForMoreMediaData {
+            surface.displayLayer.enqueue(sampleBuf)
+        } else {
+            surface.displayLayer.flush()
         }
     }
 }

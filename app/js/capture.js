@@ -265,6 +265,7 @@ function _processAudio (pkt, frame) {
 
       const enc = new ffmpeg.Packet()
       while (_encodeAudio.receivePacket(enc)) {
+        if (Math.random() < 0.01) console.log('[capture] audio packet size:', enc.data.length)
         _onAudioPacket?.(Date.now(), Buffer.from(enc.data))
       }
       enc.destroy()
