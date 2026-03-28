@@ -22,15 +22,21 @@ final class RPCTransport {
     func start() {
         readTask = Task { [weak self] in
             guard let self else { return }
+            var count = 0
             do {
                 for try await chunk in self.ipc {
+                    count += 1
+                    if count <= 5 || count % 100 == 0 {
+                        print("[RPCTransport] rx chunk #\(count) bytes:\(chunk.count)")
+                    }
                     self.rpc.receive(chunk)
                 }
+                print("[RPCTransport] read loop ended normally after \(count) chunks")
             } catch {
-                print("[RPCTransport] read loop ended: \(error)")
+                print("[RPCTransport] read loop error after \(count) chunks: \(error)")
             }
         }
-        print("[RPCTransport] started")
+        print("[RPCTransport] started, waiting for IPC data")
     }
 
     func stop() {
