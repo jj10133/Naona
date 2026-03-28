@@ -10,3 +10,4 @@ Info.plist
 *.DS_Store
 *.xcframework
 *.framework
+package-lock.json
