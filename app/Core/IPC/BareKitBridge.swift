@@ -4,11 +4,11 @@ import BareKit
 import WebRTC
 import Foundation
 
-// MARK: - Call mode
+// MARK: - Call role
 
-enum CallMode: String {
-    case one  = "one"   // 1-to-1, reject 3rd peer
-    case mesh = "mesh"  // group, everyone connects
+enum CallRole: String {
+    case host  = "host"   // SFU node — connects to all guests
+    case guest = "guest"  // Participant — connects only to host
 }
 
 // MARK: - Bridge messages
@@ -19,6 +19,7 @@ enum BridgeMessage {
     case offer(peerId: String, sdp: String)
     case answer(peerId: String, sdp: String)
     case candidate(peerId: String, sdp: String, sdpMid: String?, sdpMLineIndex: Int32)
+    case participantCount(Int)  // total participants including self
     case roomFull
     case hangup
     case error(message: String)
@@ -106,6 +107,10 @@ final class BareKitBridge {
             let idx = (json["sdpMLineIndex"] as? Int).map(Int32.init) ?? 0
             msg = .candidate(peerId: peerId, sdp: sdp, sdpMid: mid, sdpMLineIndex: idx)
 
+        case "participantCount":
+            let count = json["count"] as? Int ?? 1
+            msg = .participantCount(count)
+
         case "roomFull":
             msg = .roomFull
 
@@ -124,24 +129,25 @@ final class BareKitBridge {
     }
 
     // MARK: - Swift → JS
-    // All signaling messages are addressed to a specific peerId
 
-    func sendCall(topic: String, mode: CallMode) {
-        send(["type": "call", "topic": topic, "mode": mode.rawValue])
+    func sendCall(topic: String, role: CallRole) {
+        send(["type": "call", "topic": topic, "mode": "group", "role": role.rawValue])
     }
 
     func sendSDP(_ sdp: RTCSessionDescription, to peerId: String) {
-        send(["type": sdp.type == .offer ? "offer" : "answer",
-              "sdp": sdp.sdp,
-              "peerId": peerId])
+        send([
+            "type":   sdp.type == .offer ? "offer" : "answer",
+            "sdp":    sdp.sdp,
+            "peerId": peerId
+        ])
     }
 
     func sendCandidate(_ candidate: RTCIceCandidate, to peerId: String) {
         var p: [String: Any] = [
-            "type": "candidate",
-            "sdp": candidate.sdp,
-            "sdpMLineIndex": candidate.sdpMLineIndex,
-            "peerId": peerId
+            "type":           "candidate",
+            "sdp":            candidate.sdp,
+            "sdpMLineIndex":  candidate.sdpMLineIndex,
+            "peerId":         peerId
         ]
         if let mid = candidate.sdpMid { p["sdpMid"] = mid }
         send(p)
@@ -151,7 +157,7 @@ final class BareKitBridge {
 
     private func send(_ payload: [String: Any]) {
         guard var data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        data.append(0x0A)
+        data.append(0x0A) // newline
         Task {
             do { try await ipc.write(data: data) }
             catch { print("[BareKitBridge] write error: \(error)") }

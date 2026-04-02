@@ -1,13 +1,6 @@
-//
-//  RootView.swift
-//  App
-//
-//  Created by Janardhan on 2026-03-22.
-//
+// RootView.swift
 
 import SwiftUI
-
-// MARK: - RootView
 
 struct RootView: View {
     @ObservedObject var router: AppRouter
@@ -19,8 +12,8 @@ struct RootView: View {
                 VideoCallView(vm: vm)
                     .transition(.opacity)
             } else {
-                LobbyView { topic, mode in
-                    router.startCall(ipc: worker.ipc, topic: topic, mode: mode)
+                LobbyView { topic, role in
+                    router.startCall(ipc: worker.ipc, topic: topic, role: role)
                 }
                 .transition(.opacity)
             }

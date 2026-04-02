@@ -79,69 +79,20 @@ targets:
       preActions:
         - name: Link & Pack
           script: |
-            set -eu
+            
+            PATH="${PATH}" "${PWD}/node_modules/.bin/bare-link" \
+              --host darwin-arm64 \
+              --host ios-arm64 \
+              --host ios-arm64-simulator \
+              --out ${PWD}/addons/ \
+              ${PWD}
+            PATH="${PATH}" "${PWD}/node_modules/.bin/bare-pack" \
+              --host darwin-arm64 \
+              --host ios-arm64 \
+              --host ios-arm64-simulator \
+              --linked \
+              --base ${PWD} \
+              --out ${PWD}/app.bundle \
+              ${PWD}/app/js/app.js
 
-            export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 
-            [ -x "/opt/homebrew/bin/brew" ] && eval "$(/opt/homebrew/bin/brew shellenv)"
-            [ -x "/usr/local/bin/brew" ]    && eval "$(/usr/local/bin/brew shellenv)"
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
-            [ -d "$HOME/.volta/bin" ] && export PATH="$HOME/.volta/bin:$PATH"
-            command -v fnm &>/dev/null && eval "$(fnm env)"
-            export PATH="/usr/local/bin:$PATH"
-
-            if ! command -v node &>/dev/null; then
-              echo "error: 'node' not found." >&2; exit 1
-            fi
-            echo "node $(node --version) at $(which node)"
-
-            mkdir -p "${PWD}/app/addons"
-
-            # Generate a safe empty addons.yml first so xcodegen never fails on
-            # a clean checkout. bare-link will overwrite it for iOS builds.
-            if [ ! -f "${PWD}/app/addons/addons.yml" ]; then
-              printf "configs:\n  base: {}\n" > "${PWD}/app/addons/addons.yml"
-            fi
-
-            # Only run bare-link (and embed addons) for iOS builds.
-            # macOS has no published native addon slices — skip it entirely.
-            case "${PLATFORM_NAME:-}" in
-              iphoneos|iphonesimulator)
-                echo "bare-link: ios…"
-                "${PWD}/node_modules/.bin/bare-link" \
-                  --preset ios \
-                  --out    "${PWD}/app/addons" \
-                  "${PWD}"
-
-                echo "Signing xcframeworks…"
-                find "${PWD}/app/addons" -name "*.xcframework" | while read -r fw; do
-                  find "$fw" \( -name "*.framework" -o -name "*.dylib" -o -name "*.a" \) \
-                    | while read -r inner; do
-                        codesign --force --sign - "$inner" 2>/dev/null || true
-                      done
-                  codesign --force --sign - "$fw" 2>/dev/null || true
-                  echo "  signed: $(basename "$fw")"
-                done
-
-                PACK_PRESET=ios
-                ;;
-              macosx)
-                echo "macOS build — skipping bare-link (no macOS addon slices published)"
-                # Write an empty addons.yml so the include doesn't break xcodegen
-                printf "configs:\n  base: {}\n" > "${PWD}/app/addons/addons.yml"
-                PACK_PRESET=darwin
-                ;;
-              *)
-                PACK_PRESET=ios
-                ;;
-            esac
-
-            echo "bare-pack: ${PACK_PRESET}…"
-            "${PWD}/node_modules/.bin/bare-pack" \
-              --preset "${PACK_PRESET}" \
-              --base   "${PWD}" \
-              --out    "${PWD}/app/app.bundle" \
-              "${PWD}/app/js/app.js"
-
-            echo "Link & Pack complete."

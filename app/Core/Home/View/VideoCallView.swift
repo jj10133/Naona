@@ -3,58 +3,47 @@
 import SwiftUI
 import WebRTC
 
-// MARK: - VideoRenderer (iOS)
+// MARK: - VideoRenderer
 
 #if os(iOS)
 import UIKit
-
 struct VideoRenderer: UIViewRepresentable {
     let track: RTCVideoTrack?
-
     func makeUIView(context: Context) -> RTCMTLVideoView {
         let v = RTCMTLVideoView(frame: .zero)
         v.videoContentMode = .scaleAspectFill
         v.backgroundColor = .black
         return v
     }
-
     func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {
         context.coordinator.currentTrack?.remove(uiView)
         context.coordinator.currentTrack = track
         track?.add(uiView)
     }
-
     static func dismantleUIView(_ uiView: RTCMTLVideoView, coordinator: Coordinator) {
         coordinator.currentTrack?.remove(uiView)
     }
-
     func makeCoordinator() -> Coordinator { Coordinator() }
     class Coordinator { var currentTrack: RTCVideoTrack? }
 }
-
 #elseif os(macOS)
 import AppKit
-
 struct VideoRenderer: NSViewRepresentable {
     let track: RTCVideoTrack?
-
     func makeNSView(context: Context) -> RTCMTLNSVideoView {
         let v = RTCMTLNSVideoView(frame: .zero)
         v.wantsLayer = true
         v.layer?.backgroundColor = NSColor.black.cgColor
         return v
     }
-
     func updateNSView(_ nsView: RTCMTLNSVideoView, context: Context) {
         context.coordinator.currentTrack?.remove(nsView)
         context.coordinator.currentTrack = track
         track?.add(nsView)
     }
-
     static func dismantleNSView(_ nsView: RTCMTLNSVideoView, coordinator: Coordinator) {
         coordinator.currentTrack?.remove(nsView)
     }
-
     func makeCoordinator() -> Coordinator { Coordinator() }
     class Coordinator { var currentTrack: RTCVideoTrack? }
 }
@@ -68,21 +57,26 @@ struct VideoCallView: View {
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
 
+    // All displayable remote video tracks flattened across all peer sessions
+    // In host mode: one track per PeerSession
+    // In guest mode: possibly many tracks from the single host PeerSession
+    private var allRemoteTracks: [RTCVideoTrack] {
+        vm.peers.flatMap { $0.remoteVideoTracks }
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // Main video area — switches between 1-to-1 and grid
-            if vm.peers.isEmpty {
+            if allRemoteTracks.isEmpty {
                 waitingView
-            } else if vm.mode == .one, let peer = vm.peers.first {
-                oneToOneLayout(peer: peer)
+            } else if allRemoteTracks.count == 1 {
+                oneToOneLayout(track: allRemoteTracks[0])
             } else {
-                meshLayout
+                gridLayout(tracks: allRemoteTracks)
             }
 
-            // Overlay controls
-            if controlsVisible || vm.peers.isEmpty {
+            if controlsVisible || allRemoteTracks.isEmpty {
                 VStack {
                     topBar
                     Spacer()
@@ -92,21 +86,19 @@ struct VideoCallView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: controlsVisible)
-        .animation(.easeInOut(duration: 0.3), value: vm.peers.count)
+        .animation(.easeInOut(duration: 0.3),  value: allRemoteTracks.count)
         .onChange(of: vm.callState.isTerminal) { if $0 { vm.onCallEnded?() } }
         .onAppear { scheduleHide() }
     }
 
-    // MARK: - 1-to-1 layout (FaceTime style)
+    // MARK: - 1-to-1 layout
 
-    private func oneToOneLayout(peer: PeerSession) -> some View {
+    private func oneToOneLayout(track: RTCVideoTrack) -> some View {
         ZStack {
-            // Remote fullscreen
-            VideoRenderer(track: peer.remoteVideoTrack)
+            VideoRenderer(track: track)
                 .ignoresSafeArea()
                 .onTapGesture { toggleControls() }
 
-            // Local PiP top-right
             VStack {
                 HStack {
                     Spacer()
@@ -119,14 +111,14 @@ struct VideoCallView: View {
         }
     }
 
-    // MARK: - Mesh grid layout
+    // MARK: - Grid layout (2+ remote tracks)
 
-    private var meshLayout: some View {
+    private func gridLayout(tracks: [RTCVideoTrack]) -> some View {
         GeometryReader { geo in
-            let count = vm.peers.count
-            let cols = count <= 2 ? 1 : 2
-            let rows = Int(ceil(Double(count) / Double(cols)))
-            let cellW = geo.size.width / CGFloat(cols)
+            let count = tracks.count
+            let cols  = count <= 2 ? 1 : 2
+            let rows  = Int(ceil(Double(count) / Double(cols)))
+            let cellW = geo.size.width  / CGFloat(cols)
             let cellH = geo.size.height / CGFloat(rows)
 
             ZStack {
@@ -134,23 +126,15 @@ struct VideoCallView: View {
                     columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: cols),
                     spacing: 2
                 ) {
-                    ForEach(vm.peers) { peer in
-                        ZStack(alignment: .bottomLeading) {
-                            VideoRenderer(track: peer.remoteVideoTrack)
-                                .frame(width: cellW, height: cellH)
-                                .background(Color(white: 0.15))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-
-                            // Peer status dot
-                            Circle()
-                                .fill(peer.connectionState == .connected ? Color.green : Color.orange)
-                                .frame(width: 8, height: 8)
-                                .padding(8)
-                        }
+                    ForEach(tracks.indices, id: \.self) { idx in
+                        VideoRenderer(track: tracks[idx])
+                            .frame(width: cellW, height: cellH)
+                            .background(Color(white: 0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                 }
 
-                // Local PiP in corner
+                // Local PiP
                 VStack {
                     HStack {
                         Spacer()
@@ -166,7 +150,7 @@ struct VideoCallView: View {
         .onTapGesture { toggleControls() }
     }
 
-    // MARK: - Waiting screen
+    // MARK: - Waiting
 
     private var waitingView: some View {
         ZStack {
@@ -176,18 +160,24 @@ struct VideoCallView: View {
                     .fill(Color.green.opacity(0.2))
                     .frame(width: 100, height: 100)
                     .overlay(
-                        Image(systemName: vm.mode == .one ? "person.fill" : "person.3.fill")
-                            .font(.system(size: 40))
+                        Image(systemName: "person.3.fill")
+                            .font(.system(size: 38))
                             .foregroundColor(.white.opacity(0.6))
                     )
-
                 VStack(spacing: 6) {
                     Text(vm.callState.label)
                         .font(.title3.weight(.semibold))
                         .foregroundColor(.white)
-                    Text("Waiting for others to join…")
+                    Text(vm.role == .host
+                         ? "Waiting for guests to join…"
+                         : "Connecting to room…")
                         .font(.subheadline)
                         .foregroundColor(.white.opacity(0.5))
+                    if vm.participantCount > 1 {
+                        Text("\(vm.participantCount) in room")
+                            .font(.caption)
+                            .foregroundColor(.green.opacity(0.8))
+                    }
                 }
             }
         }
@@ -226,13 +216,10 @@ struct VideoCallView: View {
 
             Spacer()
 
-            // Peer count badge for mesh calls
-            if vm.mode == .mesh && !vm.peers.isEmpty {
+            if vm.participantCount > 1 {
                 HStack(spacing: 4) {
-                    Image(systemName: "person.fill")
-                        .font(.caption2)
-                    Text("\(vm.peers.count + 1)")
-                        .font(.caption.weight(.semibold))
+                    Image(systemName: "person.fill").font(.caption2)
+                    Text("\(vm.participantCount)").font(.caption.weight(.semibold))
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 10)
@@ -251,7 +238,7 @@ struct VideoCallView: View {
         HStack(spacing: 20) {
             circleButton(
                 icon: vm.isAudioMuted ? "mic.slash.fill" : "mic.fill",
-                bg: vm.isAudioMuted ? .red : Color.white.opacity(0.2),
+                bg:   vm.isAudioMuted ? .red : Color.white.opacity(0.2),
                 size: 56
             ) { vm.toggleMute() }
 
@@ -261,7 +248,7 @@ struct VideoCallView: View {
 
             circleButton(
                 icon: vm.isVideoEnabled ? "video.fill" : "video.slash.fill",
-                bg: vm.isVideoEnabled ? Color.white.opacity(0.2) : .red,
+                bg:   vm.isVideoEnabled ? Color.white.opacity(0.2) : .red,
                 size: 56
             ) { vm.toggleVideo() }
         }
@@ -285,7 +272,7 @@ struct VideoCallView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Auto-hide
+    // MARK: - Auto-hide controls
 
     private func toggleControls() {
         withAnimation { controlsVisible.toggle() }
@@ -298,9 +285,7 @@ struct VideoCallView: View {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                if !vm.peers.isEmpty {
-                    withAnimation { controlsVisible = false }
-                }
+                if !allRemoteTracks.isEmpty { withAnimation { controlsVisible = false } }
             }
         }
     }
@@ -321,4 +306,3 @@ struct VideoCallView: View {
         #endif
     }
 }
-

@@ -6,19 +6,15 @@ const b4a = require('b4a')
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let swarm = null
+let swarm    = null
+let myRole = 'guest'   // 'host' | 'guest'
 
-// Map of peerId (hex) → socket
-// 1-to-1: max 1 entry, extras are rejected
-// mesh:   unlimited entries
+// peerId (hex) → socket
 const peers = new Map()
 
-// Buffered signaling messages keyed by peerId, queued before socket is ready
+// Buffered signaling messages, queued before socket is ready
 const pending = new Map()
 
-// Mode is encoded in the topic prefix sent from Swift:
-//   { type: 'call', topic: '...', mode: 'one' | 'mesh' }
-let roomMode = 'one'   // default safe
 let ipcBuffer = ''
 
 // ─── IPC: Swift → JS ─────────────────────────────────────────────────────────
@@ -36,11 +32,10 @@ IPC.on('data', (raw) => {
 
     switch (msg.type) {
       case 'call':
-        roomMode = msg.mode === 'mesh' ? 'mesh' : 'one'
+        myRole = msg.role === 'host' ? 'host' : 'guest'
         startSwarm(msg.topic)
         break
 
-      // Signaling messages from Swift are addressed to a specific peer
       case 'offer':
       case 'answer':
       case 'candidate':
@@ -67,29 +62,48 @@ async function startSwarm (topicHex) {
   swarm = new Hyperswarm()
 
   swarm.on('connection', (socket, peerInfo) => {
-    const peerId = b4a.toString(peerInfo.publicKey, 'hex')
+    const peerId  = b4a.toString(peerInfo.publicKey, 'hex')
     const shortId = peerId.slice(0, 8)
 
-    // ── 1-to-1: reject if room already has a peer ──────────────────────────
-    if (roomMode === 'one' && peers.size >= 1) {
-      console.log('[js] 1-to-1 room full, rejecting peer', shortId)
+    // ── Guest: only connect to ONE peer (the host) ──────────────────────
+    // Guests find multiple peers on the DHT but only talk to host.
+    if (myRole === 'guest' && peers.size >= 1) {
+      console.log('[js] guest: already connected to host, rejecting', shortId)
       socket.destroy()
-      sendToSwift({ type: 'roomFull' })
       return
     }
 
-    console.log('[js] peer connected:', shortId, '| mode:', roomMode)
+    console.log('[js] connected:', shortId, '| myRole:', myRole)
     peers.set(peerId, socket)
 
-    // Flush pending messages for this peer
+    // Flush buffered signaling
     const queued = pending.get(peerId) || []
     pending.delete(peerId)
     for (const m of queued) writeToPeer(socket, m)
 
-    // Tell Swift a new peer joined and whether we are the caller for this pair
-    sendToSwift({ type: 'peerJoined', peerId, isCaller: peerInfo.client })
+    // ── Notify Swift about the new peer ──────────────────────────────────
+    if (myRole === 'host') {
+      // Host always makes the WebRTC offer to each guest
+      sendToSwift({ type: 'peerJoined', peerId, isCaller: true })
 
-    // Per-peer line buffer for incoming signaling
+      // Broadcast updated participant count to all connected guests
+      // so they can adapt their encoding bitrate
+      const count = peers.size + 1 // +1 for host itself
+      for (const [, s] of peers) {
+        writeToPeer(s, { type: 'participantCount', count })
+      }
+      // Also tell Swift the current count so host UI updates
+      sendToSwift({ type: 'participantCount', count })
+
+    } else {
+      // Guest connecting to host:
+      //   - host always makes the offer (isCaller: false for guest)
+      //   - for 1-to-1: whoever dialed makes the offer (peerInfo.client)
+      // Guest always waits for host's offer
+      sendToSwift({ type: 'peerJoined', peerId, isCaller: false })
+    }
+
+    // ── Relay data from this peer back to Swift ───────────────────────────
     let peerBuffer = ''
     socket.on('data', (chunk) => {
       peerBuffer += chunk.toString()
@@ -99,7 +113,6 @@ async function startSwarm (topicHex) {
         if (!line.trim()) continue
         try {
           const msg = JSON.parse(line)
-          // Tag message with sender so Swift knows which peer it came from
           sendToSwift({ ...msg, peerId })
         } catch (e) {
           console.error('[js] bad peer msg from', shortId, e.message)
@@ -107,14 +120,19 @@ async function startSwarm (topicHex) {
       }
     })
 
-    socket.on('error', (err) => {
-      console.error('[js] socket error', shortId, err.message)
-    })
+    socket.on('error', (err) => console.error('[js] socket error', shortId, err.message))
 
     socket.on('close', () => {
       peers.delete(peerId)
-      console.log('[js] peer disconnected:', shortId, '| remaining:', peers.size)
+      console.log('[js] disconnected:', shortId, '| remaining:', peers.size)
       sendToSwift({ type: 'peerLeft', peerId })
+
+      // Update participant count after someone leaves
+      if (myRole === 'host') {
+        const count = peers.size + 1
+        for (const [, s] of peers) writeToPeer(s, { type: 'participantCount', count })
+        sendToSwift({ type: 'participantCount', count })
+      }
     })
   })
 
@@ -126,7 +144,7 @@ async function startSwarm (topicHex) {
 
   const discovery = swarm.join(topicBuf, { client: true, server: true })
   await discovery.flushed()
-  console.log('[js] joined topic in', roomMode, 'mode, waiting for peers…')
+  console.log('[js] joined | mode:', roomMode, '| role:', myRole)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -136,7 +154,6 @@ function forwardToPeer (peerId, msg) {
   if (socket && !socket.destroyed) {
     writeToPeer(socket, msg)
   } else {
-    // Buffer until socket connects
     if (!pending.has(peerId)) pending.set(peerId, [])
     pending.get(peerId).push(msg)
   }

@@ -1,25 +1,18 @@
-//
-//  AppRouter.swift
-//  App
-//
-//  Created by Janardhan on 2026-03-22.
-//
+// AppRouter.swift
 
 import Foundation
 import BareKit
 import AVFoundation
 
-// MARK: - AppRouter
-
 @MainActor
 final class AppRouter: ObservableObject {
     @Published var activeCall: CallViewModel? = nil
 
-    func startCall(ipc: IPC, topic: String, mode: CallMode) {
+    func startCall(ipc: IPC, topic: String, role: CallRole) {
         requestMediaPermissions {
             let vm = CallViewModel(ipc: ipc)
             vm.onCallEnded = { [weak self] in self?.activeCall = nil }
-            vm.startCall(topic: topic, mode: mode)
+            vm.startCall(topic: topic, role: role)
             self.activeCall = vm
         }
     }
