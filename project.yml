@@ -48,6 +48,7 @@ targets:
     sources:
       - path: app/App.swift
       - path: app/app.bundle
+        optional: true
 
       - path: app/js/app.js
         group: app/js

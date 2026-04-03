@@ -144,7 +144,7 @@ async function startSwarm (topicHex) {
 
   const discovery = swarm.join(topicBuf, { client: true, server: true })
   await discovery.flushed()
-  console.log('[js] joined | mode:', roomMode, '| role:', myRole)
+  console.log('[js] joined | role:', myRole)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
