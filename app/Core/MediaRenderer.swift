@@ -61,41 +61,60 @@ final class MediaRenderer {
 
     // MARK: - Video
 
-    private var _parseCount = 0
+    // VTCompressionSession outputs AVCC: [4B length BE][NAL data][4B length BE][NAL data]...
     private func _parseAnnexB(_ data: Data) {
-        _parseCount += 1
         let bytes = [UInt8](data)
-        var nals: [Data] = []
-        var i = 0, start = -1
+        var i = 0
+        var nals: [(type: UInt8, data: Data)] = []
 
-        while i < bytes.count {
-            let sc4 = i + 3 < bytes.count && bytes[i]==0 && bytes[i+1]==0 && bytes[i+2]==0 && bytes[i+3]==1
-            let sc3 = i + 2 < bytes.count && bytes[i]==0 && bytes[i+1]==0 && bytes[i+2]==1
-            if sc4 || sc3 {
-                if start >= 0 { nals.append(data.subdata(in: start..<i)) }
-                i += sc4 ? 4 : 3; start = i
-            } else { i += 1 }
-        }
-        if start >= 0 { nals.append(data.subdata(in: start..<data.count)) }
-
-        if _parseCount <= 5 {
-            print("[Renderer] frame #\(_parseCount) nals:\(nals.count) types:\(nals.map { $0[0] & 0x1F })")
+        // Try AVCC first (4-byte length prefix)
+        var isAVCC = false
+        if bytes.count > 4 {
+            let len = Int(UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 |
+                         UInt32(bytes[2]) << 8  | UInt32(bytes[3]))
+            if len > 0 && len < bytes.count { isAVCC = true }
         }
 
-        for nal in nals where !nal.isEmpty {
-            let nalType = nal[0] & 0x1F
+        if isAVCC {
+            while i + 4 <= bytes.count {
+                let len = Int(UInt32(bytes[i]) << 24 | UInt32(bytes[i+1]) << 16 |
+                              UInt32(bytes[i+2]) << 8  | UInt32(bytes[i+3]))
+                i += 4
+                guard len > 0, i + len <= bytes.count else { break }
+                let nal = data.subdata(in: i..<(i + len))
+                if !nal.isEmpty { nals.append((nal[0] & 0x1F, nal)) }
+                i += len
+            }
+        } else {
+            // Annex-B fallback
+            var start = -1
+            while i < bytes.count {
+                let sc4 = i+3 < bytes.count && bytes[i]==0 && bytes[i+1]==0 && bytes[i+2]==0 && bytes[i+3]==1
+                let sc3 = i+2 < bytes.count && bytes[i]==0 && bytes[i+1]==0 && bytes[i+2]==1
+                if sc4 || sc3 {
+                    if start >= 0 {
+                        let nal = data.subdata(in: start..<i)
+                        if !nal.isEmpty { nals.append((nal[0] & 0x1F, nal)) }
+                    }
+                    i += sc4 ? 4 : 3; start = i
+                } else { i += 1 }
+            }
+            if start >= 0 {
+                let nal = data.subdata(in: start..<data.count)
+                if !nal.isEmpty { nals.append((nal[0] & 0x1F, nal)) }
+            }
+        }
+
+        for (nalType, nal) in nals {
             switch nalType {
             case 7:
                 sps = nal
-                _rebuildFormat()
-                print("[Renderer] got SPS size:\(nal.count)")
+                if pps != nil { _rebuildFormat() }  // rebuild only when we have both
             case 8:
                 pps = nal
-                _rebuildFormat()
-                print("[Renderer] got PPS size:\(nal.count) format:\(videoFormat != nil)")
+                if sps != nil { _rebuildFormat() }  // rebuild only when we have both
             case 5:
                 gotKeyframe = true
-                print("[Renderer] got IDR keyframe size:\(nal.count)")
                 _enqueue(nal, isIDR: true)
             case 1:
                 if gotKeyframe { _enqueue(nal, isIDR: false) }
@@ -125,7 +144,7 @@ final class MediaRenderer {
     }
 
     private func _enqueue(_ nal: Data, isIDR: Bool) {
-        guard let fmt = videoFormat else { print("[Renderer] enqueue skipped - no format"); return }
+        guard let fmt = videoFormat else { return }
 
         let lenBE = UInt32(nal.count).bigEndian
         var avcc  = withUnsafeBytes(of: lenBE) { Data($0) }
@@ -169,11 +188,7 @@ final class MediaRenderer {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.displayLayer.status == .failed {
-                print("[Renderer] layer failed - flushing")
-                self.displayLayer.flush()
-            }
-            print("[Renderer] enqueue isIDR:\(isIDR) ready:\(self.displayLayer.isReadyForMoreMediaData) status:\(self.displayLayer.status.rawValue) bounds:\(self.displayLayer.bounds)")
+            if self.displayLayer.status == .failed { self.displayLayer.flush() }
             if self.displayLayer.isReadyForMoreMediaData {
                 self.displayLayer.enqueue(sample)
             }
