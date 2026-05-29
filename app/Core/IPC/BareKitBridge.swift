@@ -1,35 +1,26 @@
-// BareKitBridge.swift
-
 import BareKit
-import WebRTC
+import AVFoundation
 import Foundation
 
-// MARK: - Call role
-
 enum CallRole: String {
-    case host  = "host"   // SFU node — connects to all guests
-    case guest = "guest"  // Participant — connects only to host
+    case host  = "host"
+    case guest = "guest"
 }
 
-// MARK: - Bridge messages
-
 enum BridgeMessage {
-    case peerJoined(peerId: String, isCaller: Bool)
+    case peerJoined(peerId: String)
     case peerLeft(peerId: String)
-    case offer(peerId: String, sdp: String)
-    case answer(peerId: String, sdp: String)
-    case candidate(peerId: String, sdp: String, sdpMid: String?, sdpMLineIndex: Int32)
-    case participantCount(Int)  // total participants including self
-    case roomFull
+    case videoFrame(peerId: String, data: Data)
+    case audioFrame(peerId: String, data: Data)
+    case peerMute(peerId: String, audio: Bool, video: Bool)
+    case participantCount(Int)
     case hangup
-    case error(message: String)
+    case error(String)
 }
 
 protocol BareKitBridgeDelegate: AnyObject {
     func bridge(_ bridge: BareKitBridge, didReceive message: BridgeMessage)
 }
-
-// MARK: - BareKitBridge
 
 final class BareKitBridge {
 
@@ -47,14 +38,12 @@ final class BareKitBridge {
             do {
                 for try await data in self.ipc { self.handleChunk(data) }
             } catch {
-                print("[BareKitBridge] read error: \(error)")
+                print("[Bridge] read error: \(error)")
             }
         }
     }
 
     func stopListening() { readTask?.cancel(); readTask = nil }
-
-    // MARK: - Chunk → line splitting
 
     private func handleChunk(_ data: Data) {
         guard let str = String(data: data, encoding: .utf8) else { return }
@@ -69,98 +58,80 @@ final class BareKitBridge {
     }
 
     private func parseAndDeliver(_ line: String) {
-        guard
-            let data = line.data(using: .utf8),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = json["type"] as? String
-        else {
-            print("[BareKitBridge] malformed: \(line.prefix(80))")
-            return
-        }
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String
+        else { return }
 
         let msg: BridgeMessage
         switch type {
 
         case "peerJoined":
             guard let peerId = json["peerId"] as? String else { return }
-            let isCaller = json["isCaller"] as? Bool ?? false
-            msg = .peerJoined(peerId: peerId, isCaller: isCaller)
+            msg = .peerJoined(peerId: peerId)
 
         case "peerLeft":
             guard let peerId = json["peerId"] as? String else { return }
             msg = .peerLeft(peerId: peerId)
 
-        case "offer":
+        case "videoFrame":
             guard let peerId = json["peerId"] as? String,
-                  let sdp   = json["sdp"]    as? String else { return }
-            msg = .offer(peerId: peerId, sdp: sdp)
+                  let b64    = json["data"]   as? String,
+                  let raw    = Data(base64Encoded: b64) else { return }
+            msg = .videoFrame(peerId: peerId, data: raw)
 
-        case "answer":
+        case "audioFrame":
             guard let peerId = json["peerId"] as? String,
-                  let sdp   = json["sdp"]    as? String else { return }
-            msg = .answer(peerId: peerId, sdp: sdp)
+                  let b64    = json["data"]   as? String,
+                  let raw    = Data(base64Encoded: b64) else { return }
+            msg = .audioFrame(peerId: peerId, data: raw)
 
-        case "candidate":
-            guard let peerId = json["peerId"] as? String,
-                  let sdp   = json["sdp"]    as? String else { return }
-            let mid = json["sdpMid"] as? String
-            let idx = (json["sdpMLineIndex"] as? Int).map(Int32.init) ?? 0
-            msg = .candidate(peerId: peerId, sdp: sdp, sdpMid: mid, sdpMLineIndex: idx)
+        case "mute":
+            guard let peerId = json["peerId"] as? String else { return }
+            msg = .peerMute(peerId: peerId,
+                            audio: json["audio"] as? Bool ?? false,
+                            video: json["video"] as? Bool ?? false)
 
         case "participantCount":
-            let count = json["count"] as? Int ?? 1
-            msg = .participantCount(count)
-
-        case "roomFull":
-            msg = .roomFull
+            msg = .participantCount(json["count"] as? Int ?? 1)
 
         case "hangup":
             msg = .hangup
 
         case "error":
-            msg = .error(message: json["message"] as? String ?? "unknown")
+            msg = .error(json["message"] as? String ?? "unknown")
 
         default:
-            print("[BareKitBridge] unknown type: \(type)")
             return
         }
 
         DispatchQueue.main.async { self.delegate?.bridge(self, didReceive: msg) }
     }
 
-    // MARK: - Swift → JS
-
     func sendCall(topic: String, role: CallRole) {
-        send(["type": "call", "topic": topic, "mode": "group", "role": role.rawValue])
+        send(["type": "call", "topic": topic, "role": role.rawValue])
     }
 
-    func sendSDP(_ sdp: RTCSessionDescription, to peerId: String) {
-        send([
-            "type":   sdp.type == .offer ? "offer" : "answer",
-            "sdp":    sdp.sdp,
-            "peerId": peerId
-        ])
+    func sendVideoFrame(_ data: Data) {
+        send(["type": "videoFrame", "data": data.base64EncodedString()])
     }
 
-    func sendCandidate(_ candidate: RTCIceCandidate, to peerId: String) {
-        var p: [String: Any] = [
-            "type":           "candidate",
-            "sdp":            candidate.sdp,
-            "sdpMLineIndex":  candidate.sdpMLineIndex,
-            "peerId":         peerId
-        ]
-        if let mid = candidate.sdpMid { p["sdpMid"] = mid }
-        send(p)
+    func sendAudioFrame(_ data: Data) {
+        send(["type": "audioFrame", "data": data.base64EncodedString()])
+    }
+
+    func sendMuteState(audio: Bool, video: Bool) {
+        send(["type": "muteState", "audio": audio, "video": video])
     }
 
     func sendHangup() { send(["type": "hangup"]) }
 
     private func send(_ payload: [String: Any]) {
         guard var data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        data.append(0x0A) // newline
+        data.append(0x0A)
         Task {
             do { try await ipc.write(data: data) }
-            catch { print("[BareKitBridge] write error: \(error)") }
+            catch { print("[Bridge] write error: \(error)") }
         }
     }
 }

@@ -1,4 +1,7 @@
 name: App
+options:
+  minimumXcodeGenVersion: 2.42.0
+  createIntermediateGroups: true
 include:
   - app/addons/addons.yml
 packages:
@@ -46,36 +49,8 @@ targets:
       - package: WebRTC
         product: WebRTC
     sources:
-      - path: app/App.swift
-      - path: app/app.bundle
-        optional: true
+      - app
 
-      - path: app/js/app.js
-        group: app/js
-
-      - path: app/Core/Domain/WebRTCManager.swift
-        group: app/Core/Domain
-      - path: app/Core/Domain/PeerSession.swift
-
-      - path: app/Core/Helper/CallState.swift
-        group: app/Core/Helper
-
-      - path: app/Core/IPC/BareKitBridge.swift
-        group: app/Core/IPC
-      - path: app/Core/IPC/Worker.swift
-
-      - path: app/Core/Home/View/LobbyView.swift
-        group: app/Core/Home/View
-      - path: app/Core/Home/View/VideoCallView.swift
-
-      - path: app/Core/Home/ViewModel/CallViewModel.swift
-        group: app/Core/Home/ViewModel
-
-      - path: app/Core/Root/AppRouter.swift
-        group: app/Core/Root
-      - path: app/Core/Root/RootView.swift
-
-        optional: true
     scheme:
       preActions:
         - name: Link & Pack
