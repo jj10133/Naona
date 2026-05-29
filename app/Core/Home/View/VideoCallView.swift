@@ -1,84 +1,135 @@
 import SwiftUI
 import AVFoundation
 
+// MARK: - Platform video views
+
 #if os(iOS)
 import UIKit
 
+final class VideoHostView: UIView {
+    private var displayLayer: AVSampleBufferDisplayLayer?
+
+    func attach(_ layer: AVSampleBufferDisplayLayer) {
+        displayLayer?.removeFromSuperlayer()
+        displayLayer = layer
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = bounds
+        self.layer.addSublayer(layer)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        displayLayer?.frame = bounds
+    }
+}
+
 struct VideoView: UIViewRepresentable {
     let layer: AVSampleBufferDisplayLayer
-    func makeUIView(context: Context) -> UIView {
-        let v = UIView()
-        v.backgroundColor = .black
-        layer.frame = v.bounds
-        layer.videoGravity = .resizeAspectFill
-        v.layer.addSublayer(layer)
-        return v
+    func makeUIView(context: Context) -> VideoHostView {
+        let v = VideoHostView(); v.backgroundColor = .black; v.attach(layer); return v
     }
-    func updateUIView(_ uiView: UIView, context: Context) {
-        layer.frame = uiView.bounds
+    func updateUIView(_ v: VideoHostView, context: Context) { v.attach(layer) }
+}
+
+final class PreviewHostView: UIView {
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    func attach(_ l: AVCaptureVideoPreviewLayer?) {
+        previewLayer?.removeFromSuperlayer(); previewLayer = l
+        guard let l else { return }
+        l.videoGravity = .resizeAspectFill; l.frame = bounds; layer.addSublayer(l)
     }
+    override func layoutSubviews() { super.layoutSubviews(); previewLayer?.frame = bounds }
 }
 
 struct PreviewView: UIViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer?
-    func makeUIView(context: Context) -> UIView {
-        let v = UIView()
-        v.backgroundColor = .black
-        if let l = layer { l.frame = v.bounds; l.videoGravity = .resizeAspectFill; v.layer.addSublayer(l) }
-        return v
+    func makeUIView(context: Context) -> PreviewHostView {
+        let v = PreviewHostView(); v.backgroundColor = .black; v.attach(layer); return v
     }
-    func updateUIView(_ uiView: UIView, context: Context) {
-        layer?.frame = uiView.bounds
-    }
+    func updateUIView(_ v: PreviewHostView, context: Context) { v.attach(layer) }
 }
 
 #elseif os(macOS)
 import AppKit
 
-final class _LayerHostView: NSView {
-    var hostedLayer: CALayer? {
-        didSet {
-            wantsLayer = true
-            layer?.backgroundColor = NSColor.black.cgColor
-            if let l = hostedLayer {
-                layer?.addSublayer(l)
-                l.frame = bounds
-            }
-        }
+final class VideoHostView: NSView {
+    private var displayLayer: AVSampleBufferDisplayLayer?
+
+    func attach(_ layer: AVSampleBufferDisplayLayer) {
+        displayLayer?.removeFromSuperlayer()
+        displayLayer = layer
+        wantsLayer = true
+        self.layer?.backgroundColor = NSColor.black.cgColor
+        layer.videoGravity = .resizeAspectFill
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.frame = bounds
+        CATransaction.commit()
+        self.layer?.addSublayer(layer)
     }
+
     override func layout() {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        hostedLayer?.frame = bounds
+        displayLayer?.frame = bounds
         CATransaction.commit()
     }
+
+    override var isFlipped: Bool { true }
 }
 
 struct VideoView: NSViewRepresentable {
     let layer: AVSampleBufferDisplayLayer
-    func makeNSView(context: Context) -> _LayerHostView {
-        let v = _LayerHostView()
-        layer.videoGravity = .resizeAspectFill
-        v.hostedLayer = layer
-        return v
+
+    func makeNSView(context: Context) -> VideoHostView {
+        let v = VideoHostView(); v.attach(layer); return v
     }
-    func updateNSView(_ nsView: _LayerHostView, context: Context) {}
+    func updateNSView(_ v: VideoHostView, context: Context) {
+        v.attach(layer)
+    }
+}
+
+final class PreviewHostView: NSView {
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+
+    func attach(_ l: AVCaptureVideoPreviewLayer?) {
+        previewLayer?.removeFromSuperlayer(); previewLayer = l
+        wantsLayer = true
+        self.layer?.backgroundColor = NSColor.black.cgColor
+        guard let l else { return }
+        l.videoGravity = .resizeAspectFill
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.frame = bounds
+        CATransaction.commit()
+        self.layer?.addSublayer(l)
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer?.frame = bounds
+        CATransaction.commit()
+    }
+
+    override var isFlipped: Bool { true }
 }
 
 struct PreviewView: NSViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer?
-    func makeNSView(context: Context) -> _LayerHostView {
-        let v = _LayerHostView()
-        if let l = layer {
-            l.videoGravity = .resizeAspectFill
-            v.hostedLayer = l
-        }
-        return v
+
+    func makeNSView(context: Context) -> PreviewHostView {
+        let v = PreviewHostView(); v.attach(layer); return v
     }
-    func updateNSView(_ nsView: _LayerHostView, context: Context) {}
+    func updateNSView(_ v: PreviewHostView, context: Context) {
+        v.attach(layer)
+    }
 }
 #endif
+
+// MARK: - VideoCallView
 
 struct VideoCallView: View {
 
@@ -109,6 +160,8 @@ struct VideoCallView: View {
         .onAppear { scheduleHide() }
     }
 
+    // MARK: - Layouts
+
     private func oneToOneLayout(_ peer: PeerSession) -> some View {
         ZStack(alignment: .topTrailing) {
             VideoView(layer: peer.renderer.makeVideoLayer())
@@ -118,7 +171,8 @@ struct VideoCallView: View {
             PreviewView(layer: vm.previewLayer)
                 .frame(width: 88, height: 132)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.25), lineWidth: 1))
                 .shadow(radius: 10)
                 .padding(.top, topPadding)
                 .padding(.trailing, 16)
@@ -166,7 +220,8 @@ struct VideoCallView: View {
                         PreviewView(layer: vm.previewLayer)
                             .frame(width: 88, height: 132)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                            .overlay(RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.25), lineWidth: 1))
                             .shadow(radius: 10)
                             .padding(.top, topPadding)
                             .padding(.trailing, 16)
@@ -178,6 +233,8 @@ struct VideoCallView: View {
         .ignoresSafeArea()
         .onTapGesture { toggleControls() }
     }
+
+    // MARK: - Waiting
 
     private var waitingView: some View {
         ZStack {
@@ -208,6 +265,8 @@ struct VideoCallView: View {
         }
         .onTapGesture { toggleControls() }
     }
+
+    // MARK: - Controls
 
     private func muteIcon(_ name: String) -> some View {
         Image(systemName: name)
@@ -260,8 +319,7 @@ struct VideoCallView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: size * 0.36, weight: .semibold))
-                .foregroundColor(.white)
-                .frame(width: size, height: size)
+                .foregroundColor(.white).frame(width: size, height: size)
                 .background(bg).clipShape(Circle())
         }
         .buttonStyle(.plain)
@@ -290,6 +348,7 @@ struct VideoCallView: View {
         return 20
         #endif
     }
+
     private var bottomPadding: CGFloat {
         #if os(iOS)
         return 40
