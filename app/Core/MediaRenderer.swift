@@ -63,24 +63,22 @@ final class MediaRenderer {
 
     // VTCompressionSession outputs AVCC: [4B length BE][NAL data][4B length BE][NAL data]...
     private func _parseAnnexB(_ data: Data) {
-        print("[Renderer] parsing \(data.count) bytes")
         let bytes = [UInt8](data)
-        var nals: [(type: UInt8, data: Data)] = []
         var i = 0
+        var nals: [(type: UInt8, data: Data)] = []
 
-        // VTCompressionSession outputs AVCC: 4-byte BE length prefix per NAL
+        // Try AVCC first (4-byte length prefix)
         var isAVCC = false
         if bytes.count > 4 {
             let len = Int(UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 |
                          UInt32(bytes[2]) << 8  | UInt32(bytes[3]))
-            if len > 0 && len + 4 <= bytes.count { isAVCC = true }
+            if len > 0 && len < bytes.count { isAVCC = true }
         }
-        print("[Renderer] isAVCC:\(isAVCC) bytes:\(bytes.count)")
 
         if isAVCC {
             while i + 4 <= bytes.count {
                 let len = Int(UInt32(bytes[i]) << 24 | UInt32(bytes[i+1]) << 16 |
-                             UInt32(bytes[i+2]) << 8  | UInt32(bytes[i+3]))
+                              UInt32(bytes[i+2]) << 8  | UInt32(bytes[i+3]))
                 i += 4
                 guard len > 0, i + len <= bytes.count else { break }
                 let nal = data.subdata(in: i..<(i + len))
@@ -107,15 +105,24 @@ final class MediaRenderer {
             }
         }
 
-        print("[Renderer] found \(nals.count) NALs types:\(nals.map { $0.type })")
-
         for (nalType, nal) in nals {
             switch nalType {
-            case 7: sps = nal; if pps != nil { _rebuildFormat() }
-            case 8: pps = nal; if sps != nil { _rebuildFormat() }
-            case 5: gotKeyframe = true; _enqueue(nal, isIDR: true)
-            case 1: if gotKeyframe { _enqueue(nal, isIDR: false) }
-            default: break
+            case 7:
+                sps = nal
+                print("[Renderer] SPS \(nal.count)B")
+                if pps != nil { _rebuildFormat() }
+            case 8:
+                pps = nal
+                print("[Renderer] PPS \(nal.count)B fmt:\(videoFormat != nil)")
+                if sps != nil { _rebuildFormat() }
+            case 5:
+                gotKeyframe = true
+                print("[Renderer] IDR fmt:\(videoFormat != nil)")
+                _enqueue(nal, isIDR: true)
+            case 1:
+                if gotKeyframe { _enqueue(nal, isIDR: false) }
+            default:
+                break
             }
         }
     }
@@ -211,6 +218,7 @@ final class MediaRenderer {
     }
 
     private func _audioStreamProperty(_ propertyID: AudioFileStreamPropertyID) {
+        print("[Audio] stream property: \(propertyID)")
         guard propertyID == kAudioFileStreamProperty_ReadyToProducePackets,
               let stream = audioFileStream else { return }
 
@@ -227,6 +235,9 @@ final class MediaRenderer {
         if let queue = audioQueue {
             AudioQueueStart(queue, nil)
             audioStarted = true
+            print("[Audio] AudioQueue started sr:\(asbd.mSampleRate) ch:\(asbd.mChannelsPerFrame)")
+        } else {
+            print("[Audio] AudioQueue creation FAILED")
         }
     }
 

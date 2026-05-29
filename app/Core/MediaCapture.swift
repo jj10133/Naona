@@ -141,14 +141,19 @@ final class MediaCapture: NSObject {
         var frameData = Data()
 
         if isKeyframe, let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) {
-            // Extract SPS+PPS via extensions dictionary
-            // kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms contains
-            // the avcC box which has the parameter sets
-            let exts = CMFormatDescriptionGetExtensions(fmt) as? [String: Any]
-            let atoms = exts?["SampleDescriptionExtensionAtoms"] as? [String: Any]
-            if let avcc = atoms?["avcC"] as? Data, avcc.count > 8 {
-                // Parse avcC box: skip 6-byte header, then read SPS and PPS
-                _appendParameterSets(from: avcc, into: &frameData)
+            // CFDictionary keys are CFString — must use NSDictionary bridge
+            if let exts = CMFormatDescriptionGetExtensions(fmt) {
+                let nsExts = exts as NSDictionary
+                let atomsKey = kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
+                if let atoms = nsExts[atomsKey] as? NSDictionary,
+                   let avccRaw = atoms["avcC"],
+                   let avcc = (avccRaw as? Data) ?? (avccRaw as? NSData).map({ $0 as Data }),
+                   avcc.count > 8 {
+                    _appendParameterSets(from: avcc, into: &frameData)
+                    print("[Capture] prepended SPS+PPS to keyframe, avcc size:\(avcc.count)")
+                } else {
+                    print("[Capture] WARNING: could not extract avcC from format desc")
+                }
             }
         }
 
