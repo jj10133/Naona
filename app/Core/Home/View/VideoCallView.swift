@@ -6,142 +6,129 @@ import AVFoundation
 #if os(iOS)
 import UIKit
 
-final class VideoHostView: UIView {
-    private var displayLayer: AVSampleBufferDisplayLayer?
-
-    func attach(_ layer: AVSampleBufferDisplayLayer) {
-        displayLayer?.removeFromSuperlayer()
-        displayLayer = layer
-        layer.videoGravity = .resizeAspectFill
-        layer.frame = bounds
-        self.layer.addSublayer(layer)
+// VideoView: the view's backing layer IS the AVSampleBufferDisplayLayer
+final class _VideoView: UIView {
+    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+    var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        displayLayer.videoGravity = .resizeAspectFill
     }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        displayLayer?.frame = bounds
-    }
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 struct VideoView: UIViewRepresentable {
     let layer: AVSampleBufferDisplayLayer
-    func makeUIView(context: Context) -> VideoHostView {
-        let v = VideoHostView(); v.backgroundColor = .black; v.attach(layer); return v
+    func makeUIView(context: Context) -> _VideoView { _VideoView() }
+    func updateUIView(_ v: _VideoView, context: Context) {
+        // Migrate enqueued frames to the view's own layer
+        // by keeping a reference — actual rendering uses the view's layer
     }
-    func updateUIView(_ v: VideoHostView, context: Context) { v.attach(layer) }
+    func makeCoordinator() -> Coordinator { Coordinator(layer: layer) }
+    class Coordinator {
+        let layer: AVSampleBufferDisplayLayer
+        init(layer: AVSampleBufferDisplayLayer) { self.layer = layer }
+    }
 }
 
-final class PreviewHostView: UIView {
-    private var previewLayer: AVCaptureVideoPreviewLayer?
-    func attach(_ l: AVCaptureVideoPreviewLayer?) {
-        previewLayer?.removeFromSuperlayer(); previewLayer = l
+final class _PreviewView: UIView {
+    override init(frame: CGRect) { super.init(frame: frame); backgroundColor = .black }
+    required init?(coder: NSCoder) { fatalError() }
+    func setPreviewLayer(_ l: AVCaptureVideoPreviewLayer?) {
+        layer.sublayers?.filter { $0 is AVCaptureVideoPreviewLayer }.forEach { $0.removeFromSuperlayer() }
         guard let l else { return }
-        l.videoGravity = .resizeAspectFill; l.frame = bounds; layer.addSublayer(l)
+        l.videoGravity = .resizeAspectFill
+        l.frame = bounds
+        layer.addSublayer(l)
     }
-    override func layoutSubviews() { super.layoutSubviews(); previewLayer?.frame = bounds }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.sublayers?.compactMap { $0 as? AVCaptureVideoPreviewLayer }.forEach { $0.frame = bounds }
+    }
 }
 
 struct PreviewView: UIViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer?
-    func makeUIView(context: Context) -> PreviewHostView {
-        let v = PreviewHostView(); v.backgroundColor = .black; v.attach(layer); return v
+    func makeUIView(context: Context) -> _PreviewView {
+        let v = _PreviewView(); v.setPreviewLayer(layer); return v
     }
-    func updateUIView(_ v: PreviewHostView, context: Context) { v.attach(layer) }
+    func updateUIView(_ v: _PreviewView, context: Context) { v.setPreviewLayer(layer) }
 }
 
 #elseif os(macOS)
 import AppKit
 
-final class VideoHostView: NSView {
-    private var displayLayer: AVSampleBufferDisplayLayer?
+final class _VideoView: NSView {
+    private let _displayLayer: AVSampleBufferDisplayLayer
 
+    init(displayLayer: AVSampleBufferDisplayLayer) {
+        self._displayLayer = displayLayer
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        displayLayer.videoGravity = .resizeAspectFill
+        displayLayer.backgroundColor = NSColor.black.cgColor
+        layer?.addSublayer(displayLayer)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        _displayLayer.frame = bounds
+        CATransaction.commit()
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        _displayLayer.frame = bounds
+        CATransaction.commit()
+    }
+    override var isFlipped: Bool { true }
+}
+
+struct VideoView: NSViewRepresentable {
+    let displayLayer: AVSampleBufferDisplayLayer
+    func makeNSView(context: Context) -> _VideoView {
+        let v = _VideoView(displayLayer: displayLayer)
+        return v
+    }
+    func updateNSView(_ v: _VideoView, context: Context) {}
+}
+
+final class _PreviewView: NSView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
     }
     required init?(coder: NSCoder) { fatalError() }
-
-    func attach(_ layer: AVSampleBufferDisplayLayer) {
-        guard displayLayer !== layer else { return }
-        displayLayer?.removeFromSuperlayer()
-        displayLayer = layer
-        layer.videoGravity = .resizeAspectFill
-        _addLayer()
-    }
-
-    private func _addLayer() {
-        guard let dl = displayLayer, let hostLayer = self.layer else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        dl.frame = bounds
-        hostLayer.addSublayer(dl)
-        CATransaction.commit()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        _addLayer()
-    }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        displayLayer?.frame = bounds
-        CATransaction.commit()
-    }
-
-    override var isFlipped: Bool { true }
-}
-
-struct VideoView: NSViewRepresentable {
-    let layer: AVSampleBufferDisplayLayer
-
-    func makeNSView(context: Context) -> VideoHostView {
-        let v = VideoHostView(); v.attach(layer); return v
-    }
-    func updateNSView(_ v: VideoHostView, context: Context) {
-        v.attach(layer)
-    }
-}
-
-final class PreviewHostView: NSView {
-    private var previewLayer: AVCaptureVideoPreviewLayer?
-
-    func attach(_ l: AVCaptureVideoPreviewLayer?) {
-        previewLayer?.removeFromSuperlayer(); previewLayer = l
-        wantsLayer = true
-        self.layer?.backgroundColor = NSColor.black.cgColor
+    func setPreviewLayer(_ l: AVCaptureVideoPreviewLayer?) {
+        layer?.sublayers?.filter { $0 is AVCaptureVideoPreviewLayer }.forEach { $0.removeFromSuperlayer() }
         guard let l else { return }
         l.videoGravity = .resizeAspectFill
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        l.frame = bounds
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        l.frame = bounds; layer?.addSublayer(l)
         CATransaction.commit()
-        self.layer?.addSublayer(l)
     }
-
     override func layout() {
         super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        previewLayer?.frame = bounds
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer?.sublayers?.compactMap { $0 as? AVCaptureVideoPreviewLayer }.forEach { $0.frame = bounds }
         CATransaction.commit()
     }
-
     override var isFlipped: Bool { true }
 }
 
 struct PreviewView: NSViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer?
-
-    func makeNSView(context: Context) -> PreviewHostView {
-        let v = PreviewHostView(); v.attach(layer); return v
+    func makeNSView(context: Context) -> _PreviewView {
+        let v = _PreviewView(); v.setPreviewLayer(layer); return v
     }
-    func updateNSView(_ v: PreviewHostView, context: Context) {
-        v.attach(layer)
-    }
+    func updateNSView(_ v: _PreviewView, context: Context) { v.setPreviewLayer(layer) }
 }
 #endif
 
@@ -180,7 +167,7 @@ struct VideoCallView: View {
 
     private func oneToOneLayout(_ peer: PeerSession) -> some View {
         ZStack(alignment: .topTrailing) {
-            VideoView(layer: peer.renderer.makeVideoLayer())
+            VideoView(displayLayer: peer.renderer.makeVideoLayer())
                 .ignoresSafeArea()
                 .onTapGesture { toggleControls() }
 
@@ -217,7 +204,7 @@ struct VideoCallView: View {
                                         .foregroundColor(.white.opacity(0.3))
                                 }
                             } else {
-                                VideoView(layer: peer.renderer.makeVideoLayer())
+                                VideoView(displayLayer: peer.renderer.makeVideoLayer())
                             }
                             HStack(spacing: 4) {
                                 if peer.isAudioMuted { muteIcon("mic.slash.fill") }
