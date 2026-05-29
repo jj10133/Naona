@@ -55,17 +55,33 @@ import AppKit
 final class VideoHostView: NSView {
     private var displayLayer: AVSampleBufferDisplayLayer?
 
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
     func attach(_ layer: AVSampleBufferDisplayLayer) {
+        guard displayLayer !== layer else { return }
         displayLayer?.removeFromSuperlayer()
         displayLayer = layer
-        wantsLayer = true
-        self.layer?.backgroundColor = NSColor.black.cgColor
         layer.videoGravity = .resizeAspectFill
+        _addLayer()
+    }
+
+    private func _addLayer() {
+        guard let dl = displayLayer, let hostLayer = self.layer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.frame = bounds
+        dl.frame = bounds
+        hostLayer.addSublayer(dl)
         CATransaction.commit()
-        self.layer?.addSublayer(layer)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        _addLayer()
     }
 
     override func layout() {
