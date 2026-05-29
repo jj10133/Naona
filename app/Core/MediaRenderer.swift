@@ -50,8 +50,10 @@ final class MediaRenderer {
 
     func stop() {
         playerNode.stop()
+        playerNode.reset()
         audioEngine.stop()
         audioConverter = nil
+        audioFrameCount = 0
     }
 
     // MARK: - Video
@@ -198,10 +200,11 @@ final class MediaRenderer {
 
     // MARK: - Audio
 
-    private var audioEngine    = AVAudioEngine()
-    private var playerNode     = AVAudioPlayerNode()
-    private var audioConverter: AVAudioConverter?
-    private var audioSetupDone = false
+    private var audioEngine     = AVAudioEngine()
+    private var playerNode      = AVAudioPlayerNode()
+    private var audioConverter:  AVAudioConverter?
+    private var audioFrameCount: Int = 0      // frames scheduled since last reset
+    private let maxQueuedFrames  = 10         // ~230ms at 1024 frames/44100hz
 
     private func _setupAudio() {
         let outputFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -241,6 +244,7 @@ final class MediaRenderer {
                 print("[Audio] converter creation failed sr:\(sr) ch:\(ch)"); return
             }
             audioConverter = conv
+            audioFrameCount = 0
             audioEngine.stop()
             audioEngine.disconnectNodeOutput(playerNode)
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: outputFmt)
@@ -273,8 +277,23 @@ final class MediaRenderer {
             if fed { status.pointee = .noDataNow; return nil }
             fed = true; status.pointee = .haveData; return inputBuf
         }
-        if convErr == nil && outBuf.frameLength > 0 {
-            playerNode.scheduleBuffer(outBuf)
+        if let err = convErr {
+            // Stateful AAC decoder broke — rebuild converter on next packet
+            print("[Audio] decode error: \(err.localizedDescription) — resetting converter")
+            audioConverter = nil
+            return
         }
+        guard outBuf.frameLength > 0 else { return }
+
+        // If queue has grown too large, reset to eliminate latency
+        audioFrameCount += 1
+        if audioFrameCount > maxQueuedFrames {
+            playerNode.stop()
+            playerNode.reset()
+            playerNode.play()
+            audioFrameCount = 0
+        }
+
+        playerNode.scheduleBuffer(outBuf)
     }
 }
