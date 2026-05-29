@@ -19,6 +19,8 @@ final class MediaCapture: NSObject {
     private var videoCompression: VTCompressionSession?
     private var audioConverter:   AVAudioConverter?
     private var outputFormat:     AVAudioFormat?
+    private(set) var encodedSampleRate: Double = 44100
+    private(set) var encodedChannels:   UInt32 = 1
 
     private let videoQueue = DispatchQueue(label: "naona.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "naona.audio", qos: .userInteractive)
@@ -209,7 +211,14 @@ extension MediaCapture: AVCaptureVideoDataOutputSampleBufferDelegate,
         }
 
         guard error == nil, outputBuffer.packetCount > 0 else { return }
-        let data = Data(bytes: outputBuffer.data, count: Int(outputBuffer.byteLength))
-        DispatchQueue.main.async { self.delegate?.capture(self, didEncodeAudio: data) }
+        var raw = Data(bytes: outputBuffer.data, count: Int(outputBuffer.byteLength))
+        // Strip 7-byte ADTS header if present (syncword = 0xFFF)
+        if raw.count > 7 && raw[0] == 0xFF && (raw[1] & 0xF0) == 0xF0 {
+            let frameLen = Int((UInt32(raw[3] & 0x03) << 11) | (UInt32(raw[4]) << 3) | UInt32(raw[5] >> 5))
+            if frameLen > 7 && frameLen <= raw.count {
+                raw = raw.subdata(in: 7..<frameLen)
+            }
+        }
+        DispatchQueue.main.async { self.delegate?.capture(self, didEncodeAudio: raw) }
     }
 }

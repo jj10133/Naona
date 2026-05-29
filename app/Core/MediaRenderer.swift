@@ -169,12 +169,21 @@ final class MediaRenderer {
         }
     }
 
+    var aacSampleRate: Double = 44100
+    var aacChannels:   UInt32 = 1
+
     private func _decodeAAC(_ data: Data) {
+        // Prepend 7-byte ADTS header so the system AAC decoder can parse the frame
+        let adts = _makeADTS(frameSize: data.count + 7,
+                             sampleRate: aacSampleRate, channels: aacChannels)
+        var framed = adts
+        framed.append(data)
+
         if audioConverter == nil {
             let aacSettings: [String: Any] = [
                 AVFormatIDKey:         kAudioFormatMPEG4AAC,
-                AVSampleRateKey:       44100.0,
-                AVNumberOfChannelsKey: 2
+                AVSampleRateKey:       aacSampleRate,
+                AVNumberOfChannelsKey: aacChannels
             ]
             guard let inputFormat = AVAudioFormat(settings: aacSettings) else { return }
             audioConverter = AVAudioConverter(from: inputFormat, to: outputFormat)
@@ -185,13 +194,13 @@ final class MediaRenderer {
         let inputBuffer = AVAudioCompressedBuffer(
             format: inputFormat,
             packetCapacity: 8,
-            maximumPacketSize: max(data.count, 1)
+            maximumPacketSize: max(framed.count, 1)
         )
         inputBuffer.packetCount = 1
-        inputBuffer.byteLength  = UInt32(data.count)
-        data.withUnsafeBytes { memcpy(inputBuffer.data, $0.baseAddress!, data.count) }
+        inputBuffer.byteLength  = UInt32(framed.count)
+        framed.withUnsafeBytes { memcpy(inputBuffer.data, $0.baseAddress!, framed.count) }
         inputBuffer.packetDescriptions?[0] = AudioStreamPacketDescription(
-            mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(data.count))
+            mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(framed.count))
 
         guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4096) else { return }
         var error: NSError?
@@ -205,5 +214,32 @@ final class MediaRenderer {
         if error == nil && outputBuffer.frameLength > 0 {
             playerNode.scheduleBuffer(outputBuffer)
         }
+    }
+
+    // Build a minimal 7-byte ADTS header
+    // AAC-LC, 44100 Hz (index 4) or 48000 Hz (index 3), N channels
+    private func _makeADTS(frameSize: Int, sampleRate: Double, channels: UInt32) -> Data {
+        let sampleRateIndex: UInt8
+        switch sampleRate {
+        case 48000: sampleRateIndex = 3
+        case 44100: sampleRateIndex = 4
+        case 32000: sampleRateIndex = 5
+        case 24000: sampleRateIndex = 6
+        case 22050: sampleRateIndex = 7
+        default:    sampleRateIndex = 4
+        }
+        let profile:  UInt8 = 1  // AAC-LC = profile 1 (object type 2, minus 1)
+        let ch        = UInt8(min(channels, 7))
+        let size      = UInt32(frameSize)
+
+        var adts = Data(count: 7)
+        adts[0] = 0xFF
+        adts[1] = 0xF1                                                    // no CRC
+        adts[2] = (profile << 6) | (sampleRateIndex << 2) | (ch >> 2)
+        adts[3] = ((ch & 3) << 6) | UInt8((size >> 11) & 0x3)
+        adts[4] = UInt8((size >> 3) & 0xFF)
+        adts[5] = UInt8((size & 7) << 5) | 0x1F
+        adts[6] = 0xFC
+        return adts
     }
 }

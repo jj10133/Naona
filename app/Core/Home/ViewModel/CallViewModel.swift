@@ -102,8 +102,12 @@ extension CallViewModel: BareKitBridgeDelegate {
             case .videoFrame(let peerId, let data):
                 session(for: peerId)?.renderer.receiveVideo(data)
 
-            case .audioFrame(let peerId, let data):
-                session(for: peerId)?.renderer.receiveAudio(data)
+            case .audioFrame(let peerId, let data, let sr, let ch):
+                if let renderer = session(for: peerId)?.renderer {
+                    renderer.aacSampleRate = sr
+                    renderer.aacChannels   = ch
+                    renderer.receiveAudio(data)
+                }
 
             case .peerMute(let peerId, let audio, let video):
                 if let peer = session(for: peerId) {
@@ -144,6 +148,8 @@ extension CallViewModel: MediaCaptureDelegate {
     }
 
     nonisolated func capture(_ capture: MediaCapture, didEncodeAudio data: Data) {
-        Task { @MainActor in self.bridge.sendAudioFrame(data) }
+        let sr = capture.encodedSampleRate
+        let ch = capture.encodedChannels
+        Task { @MainActor in self.bridge.sendAudioFrame(data, sampleRate: sr, channels: ch) }
     }
 }

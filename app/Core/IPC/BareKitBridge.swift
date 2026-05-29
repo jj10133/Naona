@@ -11,7 +11,7 @@ enum BridgeMessage {
     case peerJoined(peerId: String)
     case peerLeft(peerId: String)
     case videoFrame(peerId: String, data: Data)
-    case audioFrame(peerId: String, data: Data)
+    case audioFrame(peerId: String, data: Data, sampleRate: Double = 44100, channels: UInt32 = 1)
     case peerMute(peerId: String, audio: Bool, video: Bool)
     case participantCount(Int)
     case hangup
@@ -84,7 +84,9 @@ final class BareKitBridge {
             guard let peerId = json["peerId"] as? String,
                   let b64    = json["data"]   as? String,
                   let raw    = Data(base64Encoded: b64) else { return }
-            msg = .audioFrame(peerId: peerId, data: raw)
+            let sr  = json["sr"] as? Double ?? 44100
+            let ch  = json["ch"] as? UInt32 ?? 1
+            msg = .audioFrame(peerId: peerId, data: raw, sampleRate: sr, channels: ch)
 
         case "mute":
             guard let peerId = json["peerId"] as? String else { return }
@@ -116,8 +118,9 @@ final class BareKitBridge {
         send(["type": "videoFrame", "data": data.base64EncodedString()])
     }
 
-    func sendAudioFrame(_ data: Data) {
-        send(["type": "audioFrame", "data": data.base64EncodedString()])
+    func sendAudioFrame(_ data: Data, sampleRate: Double = 44100, channels: UInt32 = 1) {
+        send(["type": "audioFrame", "data": data.base64EncodedString(),
+              "sr": sampleRate, "ch": channels])
     }
 
     func sendMuteState(audio: Bool, video: Bool) {
