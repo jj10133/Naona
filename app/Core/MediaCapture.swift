@@ -11,8 +11,9 @@ final class MediaCapture: NSObject {
 
     weak var delegate: MediaCaptureDelegate?
 
-    var isAudioMuted = false
-    var isVideoMuted = false
+    var isAudioMuted    = false
+    var isVideoMuted    = false
+    private var _frameIndex: Int64 = 0
 
     private var session:          AVCaptureSession?
     private var previewLayer:     AVCaptureVideoPreviewLayer?
@@ -117,9 +118,15 @@ extension MediaCapture: AVCaptureVideoDataOutputSampleBufferDelegate,
                   let cs = videoCompression,
                   let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            _frameIndex += 1
+            // Force keyframe every 2 seconds (60 frames) or on first frame
+            var frameProps: CFDictionary? = nil
+            if _frameIndex == 1 || _frameIndex % 60 == 0 {
+                frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
+            }
             VTCompressionSessionEncodeFrame(cs, imageBuffer: imageBuffer,
                 presentationTimeStamp: pts, duration: .invalid,
-                frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil)
+                frameProperties: frameProps, sourceFrameRefcon: nil, infoFlagsOut: nil)
 
         } else if output is AVCaptureAudioDataOutput {
             guard !isAudioMuted else { return }
@@ -212,11 +219,15 @@ extension MediaCapture: AVCaptureVideoDataOutputSampleBufferDelegate,
 
         guard error == nil, outputBuffer.packetCount > 0 else { return }
         var raw = Data(bytes: outputBuffer.data, count: Int(outputBuffer.byteLength))
-        // Strip 7-byte ADTS header if present (syncword = 0xFFF)
-        if raw.count > 7 && raw[0] == 0xFF && (raw[1] & 0xF0) == 0xF0 {
+        // Strip 7-byte ADTS header if present (syncword 0xFFF in first 12 bits)
+        if raw.count > 7 && raw[0] == 0xFF && (raw[1] & 0xF6) == 0xF0 {
+            // ADTS frame: parse frame length from bits 30:18
+            // aac_frame_length = ((adts[3] & 0x03) << 11) | (adts[4] << 3) | (adts[5] >> 5)
             let frameLen = Int((UInt32(raw[3] & 0x03) << 11) | (UInt32(raw[4]) << 3) | UInt32(raw[5] >> 5))
-            if frameLen > 7 && frameLen <= raw.count {
-                raw = raw.subdata(in: 7..<frameLen)
+            let headerLen = (raw[1] & 0x01) == 0 ? 9 : 7  // with or without CRC
+            if frameLen > headerLen && frameLen <= raw.count {
+                raw = raw.subdata(in: headerLen..<frameLen)
+                print("[Capture] stripped ADTS header, raw AAC size: \(raw.count)")
             }
         }
         DispatchQueue.main.async { self.delegate?.capture(self, didEncodeAudio: raw) }

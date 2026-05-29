@@ -78,10 +78,18 @@ final class MediaRenderer {
         for nal in nals where !nal.isEmpty {
             let nalType = nal[0] & 0x1F
             switch nalType {
-            case 7: sps = nal
-            case 8: pps = nal; _buildFormatAndSession()
-            case 1, 5: _enqueue(nal)
-            default: break
+            case 7:
+                sps = nal
+            case 8:
+                pps = nal
+                _buildFormatAndSession()
+            case 5:  // IDR keyframe
+                _gotKeyframe = true
+                _enqueue(nal)
+            case 1:  // P-frame — only decode after we have a keyframe
+                if _gotKeyframe { _enqueue(nal) }
+            default:
+                break
             }
         }
     }
@@ -169,8 +177,9 @@ final class MediaRenderer {
         }
     }
 
-    var aacSampleRate: Double = 44100
-    var aacChannels:   UInt32 = 1
+    var aacSampleRate:    Double = 44100
+    var aacChannels:     UInt32 = 2  // default stereo
+    private var _gotKeyframe = false
 
     private func _decodeAAC(_ data: Data) {
         // Prepend 7-byte ADTS header so the system AAC decoder can parse the frame
