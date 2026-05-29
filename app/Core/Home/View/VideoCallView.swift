@@ -35,34 +35,48 @@ struct PreviewView: UIViewRepresentable {
 #elseif os(macOS)
 import AppKit
 
+final class _LayerHostView: NSView {
+    var hostedLayer: CALayer? {
+        didSet {
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.black.cgColor
+            if let l = hostedLayer {
+                layer?.addSublayer(l)
+                l.frame = bounds
+            }
+        }
+    }
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        hostedLayer?.frame = bounds
+        CATransaction.commit()
+    }
+}
+
 struct VideoView: NSViewRepresentable {
     let layer: AVSampleBufferDisplayLayer
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.black.cgColor
-        layer.frame = v.bounds
+    func makeNSView(context: Context) -> _LayerHostView {
+        let v = _LayerHostView()
         layer.videoGravity = .resizeAspectFill
-        v.layer?.addSublayer(layer)
+        v.hostedLayer = layer
         return v
     }
-    func updateNSView(_ nsView: NSView, context: Context) {
-        layer.frame = nsView.bounds
-    }
+    func updateNSView(_ nsView: _LayerHostView, context: Context) {}
 }
 
 struct PreviewView: NSViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer?
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.black.cgColor
-        if let l = layer { l.frame = v.bounds; l.videoGravity = .resizeAspectFill; v.layer?.addSublayer(l) }
+    func makeNSView(context: Context) -> _LayerHostView {
+        let v = _LayerHostView()
+        if let l = layer {
+            l.videoGravity = .resizeAspectFill
+            v.hostedLayer = l
+        }
         return v
     }
-    func updateNSView(_ nsView: NSView, context: Context) {
-        layer?.frame = nsView.bounds
-    }
+    func updateNSView(_ nsView: _LayerHostView, context: Context) {}
 }
 #endif
 

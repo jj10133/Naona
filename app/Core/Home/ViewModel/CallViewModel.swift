@@ -17,7 +17,10 @@ final class CallViewModel: ObservableObject {
     private let bridge:       BareKitBridge
     private let capture:      MediaCapture
 
-    var previewLayer: AVCaptureVideoPreviewLayer? { capture.makePreviewLayer() }
+    @Published var previewLayer: AVCaptureVideoPreviewLayer? = nil
+
+    private var _videoFrameCount = 0
+    private var _audioFrameCount = 0
 
     init(ipc: IPC) {
         self.bridge  = BareKitBridge(ipc: ipc)
@@ -31,6 +34,7 @@ final class CallViewModel: ObservableObject {
         self.role = role
         callState = .connecting
         capture.start(position: .front)
+        previewLayer = capture.makePreviewLayer()
         bridge.sendCall(topic: topic, role: role)
         bridge.sendMuteState(audio: false, video: false)
     }
@@ -39,6 +43,7 @@ final class CallViewModel: ObservableObject {
         bridge.sendHangup()
         bridge.stopListening()
         capture.stop()
+        previewLayer = nil
         peers.forEach { $0.stop() }
         peers.removeAll()
         callState = .idle
@@ -100,9 +105,11 @@ extension CallViewModel: BareKitBridgeDelegate {
                 }
 
             case .videoFrame(let peerId, let data):
+                print("[Receive] video from \(peerId.prefix(8)) size:\(data.count)")
                 session(for: peerId)?.renderer.receiveVideo(data)
 
             case .audioFrame(let peerId, let data, let sr, let ch):
+                print("[Receive] audio from \(peerId.prefix(8)) size:\(data.count) sr:\(sr)")
                 if let renderer = session(for: peerId)?.renderer {
                     renderer.aacSampleRate = sr
                     renderer.aacChannels   = ch
@@ -144,12 +151,24 @@ extension CallViewModel: BareKitBridgeDelegate {
 extension CallViewModel: MediaCaptureDelegate {
 
     nonisolated func capture(_ capture: MediaCapture, didEncodeVideo data: Data) {
-        Task { @MainActor in self.bridge.sendVideoFrame(data) }
+        Task { @MainActor in
+            self._videoFrameCount += 1
+            if self._videoFrameCount <= 3 || self._videoFrameCount % 300 == 0 {
+                print("[Capture] video frame #\(self._videoFrameCount) size:\(data.count) peers:\(self.peers.count)")
+            }
+            self.bridge.sendVideoFrame(data)
+        }
     }
 
     nonisolated func capture(_ capture: MediaCapture, didEncodeAudio data: Data) {
         let sr = capture.encodedSampleRate
         let ch = capture.encodedChannels
-        Task { @MainActor in self.bridge.sendAudioFrame(data, sampleRate: sr, channels: ch) }
+        Task { @MainActor in
+            self._audioFrameCount += 1
+            if self._audioFrameCount <= 3 || self._audioFrameCount % 300 == 0 {
+                print("[Capture] audio frame #\(self._audioFrameCount) size:\(data.count) sr:\(sr) ch:\(ch)")
+            }
+            self.bridge.sendAudioFrame(data, sampleRate: sr, channels: ch)
+        }
     }
 }
