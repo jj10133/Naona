@@ -214,87 +214,66 @@ final class MediaRenderer {
     }
 
     private func _decodeAudio(_ data: Data) {
-        let bytes = [UInt8](data)
-        guard bytes.count > 7 else { return }
+        guard data.count > 2 else { return }
 
-        // Parse ADTS header to get actual channel count and sample rate
-        // ADTS sync: 0xFFF in first 12 bits
-        guard bytes[0] == 0xFF && (bytes[1] & 0xF0) == 0xF0 else {
-            print("[Audio] not ADTS: \(bytes[0]) \(bytes[1])"); return
-        }
+        // Sender's AVAudioConverter outputs raw AAC (no ADTS header)
+        // aacSampleRate and aacChannels are set from IPC before this is called
+        let sr = aacSampleRate
+        let ch = max(1, Int(aacChannels))
 
-        // Extract channel config from ADTS header bits
-        // byte2: [2:profile][4:sampleRateIdx][1:privateBit][1:channelHigh]
-        // byte3: [2:channelLow][1:originality][1:home][1:copyBit][1:copyStart][13:frameLength high]
-        let sampleRateIdx = Int((bytes[2] >> 2) & 0x0F)
-        let channelConf   = Int(((bytes[2] & 0x01) << 2) | ((bytes[3] >> 6) & 0x03))
-        let hasCRC        = (bytes[1] & 0x01) == 0
-        let headerLen     = hasCRC ? 9 : 7
+        // Build or rebuild converter if format changed
+        let needsRebuild = audioConverter == nil
+            || audioConverter!.inputFormat.sampleRate != sr
+            || Int(audioConverter!.inputFormat.channelCount) != ch
 
-        let sampleRates   = [96000.0, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
-                              16000, 12000, 11025, 8000, 7350]
-        guard sampleRateIdx < sampleRates.count, channelConf > 0 else {
-            print("[Audio] bad ADTS header sr:\(sampleRateIdx) ch:\(channelConf)"); return
-        }
-        let sr = sampleRates[sampleRateIdx]
-        let ch = channelConf > 6 ? 8 : channelConf // channel_config maps directly to count
-
-        // Build converter lazily or rebuild if format changed
-        if audioConverter == nil ||
-           audioConverter!.inputFormat.sampleRate != sr ||
-           audioConverter!.inputFormat.channelCount != AVAudioChannelCount(ch) {
-
+        if needsRebuild {
             let aacSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: sr,
+                AVFormatIDKey:         kAudioFormatMPEG4AAC,
+                AVSampleRateKey:       sr,
                 AVNumberOfChannelsKey: ch
             ]
+            guard let inputFmt = AVAudioFormat(settings: aacSettings) else { return }
             let outputFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: sr,
                                           channels: AVAudioChannelCount(ch),
                                           interleaved: false)!
-            guard let inputFmt = AVAudioFormat(settings: aacSettings) else {
-                print("[Audio] bad input format"); return
+            guard let conv = AVAudioConverter(from: inputFmt, to: outputFmt) else {
+                print("[Audio] converter creation failed sr:\(sr) ch:\(ch)"); return
             }
-            audioConverter = AVAudioConverter(from: inputFmt, to: outputFmt)
-            // Reconnect engine with correct format
+            audioConverter = conv
             audioEngine.stop()
             audioEngine.disconnectNodeOutput(playerNode)
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: outputFmt)
             try? audioEngine.start()
             playerNode.play()
-            print("[Audio] converter built sr:\(sr) ch:\(ch)")
+            print("[Audio] converter ready sr:\(sr) ch:\(ch)")
         }
 
         guard let converter = audioConverter else { return }
 
-        // Strip ADTS header, feed raw AAC to converter
-        guard data.count > headerLen else { return }
-        let rawAAC = data.subdata(in: headerLen..<data.count)
-
+        // Feed raw AAC packet to converter
         let inputFmt = converter.inputFormat
         let inputBuf = AVAudioCompressedBuffer(format: inputFmt,
                                                packetCapacity: 1,
-                                               maximumPacketSize: rawAAC.count)
+                                               maximumPacketSize: max(data.count, 1))
         inputBuf.packetCount = 1
-        inputBuf.byteLength  = UInt32(rawAAC.count)
-        rawAAC.withUnsafeBytes { memcpy(inputBuf.data, $0.baseAddress!, rawAAC.count) }
+        inputBuf.byteLength  = UInt32(data.count)
+        data.withUnsafeBytes { memcpy(inputBuf.data, $0.baseAddress!, data.count) }
         inputBuf.packetDescriptions?[0] = AudioStreamPacketDescription(
             mStartOffset: 0, mVariableFramesInPacket: 0,
-            mDataByteSize: UInt32(rawAAC.count))
+            mDataByteSize: UInt32(data.count))
 
-        let frameCount = AVAudioFrameCount(inputFmt.sampleRate * 0.025) // ~25ms
+        // Output buffer sized for ~1024 AAC samples (one AAC frame)
+        let frameCapacity = AVAudioFrameCount(1024)
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: converter.outputFormat,
-                                             frameCapacity: frameCount) else { return }
+                                             frameCapacity: frameCapacity) else { return }
         var convErr: NSError?
-        var inputDone = false
-        let status = converter.convert(to: outBuf, error: &convErr) { _, outStatus in
-            if inputDone { outStatus.pointee = .noDataNow; return nil }
-            inputDone = true
-            outStatus.pointee = .haveData
-            return inputBuf
+        var fed = false
+        converter.convert(to: outBuf, error: &convErr) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true; status.pointee = .haveData; return inputBuf
         }
-        if status != .error && outBuf.frameLength > 0 {
+        if convErr == nil && outBuf.frameLength > 0 {
             playerNode.scheduleBuffer(outBuf)
         }
     }
