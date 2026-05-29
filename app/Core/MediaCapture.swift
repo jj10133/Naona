@@ -86,24 +86,79 @@ final class MediaCapture: NSObject {
             compressionSessionOut: &cs
         )
         guard let cs else { return }
-        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_RealTime,           value: kCFBooleanTrue)
-        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_ProfileLevel,        value: kVTProfileLevel_H264_Baseline_AutoLevel)
-        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_AverageBitRate,      value: 800_000 as CFNumber)
-        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
+        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_RealTime,                value: kCFBooleanTrue)
+        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_ProfileLevel,            value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_AverageBitRate,          value: 800_000 as CFNumber)
+        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,     value: 60 as CFNumber)
+        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_AllowFrameReordering,    value: kCFBooleanFalse)
+        // Emit SPS+PPS inline with every keyframe
+        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_H264EntropyMode,         value: kVTH264EntropyMode_CABAC)
         VTCompressionSessionPrepareToEncodeFrames(cs)
         videoCompression = cs
+    }
+
+    private func _appendParameterSets(from avcc: Data, into data: inout Data) {
+        // avcC format: [1:version][1:profile][1:compat][1:level][1:nal_len-1][1:num_sps]
+        //              [2:sps_len][sps_bytes]...[1:num_pps][2:pps_len][pps_bytes]...
+        let bytes = [UInt8](avcc)
+        guard bytes.count > 6 else { return }
+        var i = 5  // skip version/profile/compat/level/nal_size
+        let numSPS = Int(bytes[i] & 0x1F); i += 1
+        for _ in 0..<numSPS {
+            guard i + 2 <= bytes.count else { return }
+            let len = Int(bytes[i]) << 8 | Int(bytes[i+1]); i += 2
+            guard i + len <= bytes.count else { return }
+            let lenBE = UInt32(len).bigEndian
+            data.append(contentsOf: withUnsafeBytes(of: lenBE) { Array($0) })
+            data.append(contentsOf: bytes[i..<(i+len)]); i += len
+        }
+        guard i < bytes.count else { return }
+        let numPPS = Int(bytes[i]); i += 1
+        for _ in 0..<numPPS {
+            guard i + 2 <= bytes.count else { return }
+            let len = Int(bytes[i]) << 8 | Int(bytes[i+1]); i += 2
+            guard i + len <= bytes.count else { return }
+            let lenBE = UInt32(len).bigEndian
+            data.append(contentsOf: withUnsafeBytes(of: lenBE) { Array($0) })
+            data.append(contentsOf: bytes[i..<(i+len)]); i += len
+        }
     }
 
     private func _onEncodedVideo(_ sampleBuffer: CMSampleBuffer) {
         guard !isVideoMuted,
               let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+
+        // Check if this is a keyframe — if so, prepend SPS+PPS from format description
+        let isKeyframe: Bool = {
+            guard let atts = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false),
+                  CFArrayGetCount(atts) > 0 else { return false }
+            let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFDictionary.self)
+            let key = Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque()
+            let val = CFDictionaryGetValue(dict, key)
+            return val == nil  // NotSync absent = sync (keyframe)
+        }()
+
+        var frameData = Data()
+
+        if isKeyframe, let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            // Extract SPS+PPS via extensions dictionary
+            // kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms contains
+            // the avcC box which has the parameter sets
+            let exts = CMFormatDescriptionGetExtensions(fmt) as? [String: Any]
+            let atoms = exts?["SampleDescriptionExtensionAtoms"] as? [String: Any]
+            if let avcc = atoms?["avcC"] as? Data, avcc.count > 8 {
+                // Parse avcC box: skip 6-byte header, then read SPS and PPS
+                _appendParameterSets(from: avcc, into: &frameData)
+            }
+        }
+
         var length = 0
         var ptr: UnsafeMutablePointer<Int8>?
         CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: nil,
                                     totalLengthOut: &length, dataPointerOut: &ptr)
         guard let ptr, length > 0 else { return }
-        let data = Data(bytes: ptr, count: length)
-        DispatchQueue.main.async { self.delegate?.capture(self, didEncodeVideo: data) }
+        frameData.append(Data(bytes: ptr, count: length))
+        DispatchQueue.main.async { self.delegate?.capture(self, didEncodeVideo: frameData) }
     }
 }
 
@@ -218,18 +273,9 @@ extension MediaCapture: AVCaptureVideoDataOutputSampleBufferDelegate,
         }
 
         guard error == nil, outputBuffer.packetCount > 0 else { return }
-        var raw = Data(bytes: outputBuffer.data, count: Int(outputBuffer.byteLength))
-        // Strip 7-byte ADTS header if present (syncword 0xFFF in first 12 bits)
-        if raw.count > 7 && raw[0] == 0xFF && (raw[1] & 0xF6) == 0xF0 {
-            // ADTS frame: parse frame length from bits 30:18
-            // aac_frame_length = ((adts[3] & 0x03) << 11) | (adts[4] << 3) | (adts[5] >> 5)
-            let frameLen = Int((UInt32(raw[3] & 0x03) << 11) | (UInt32(raw[4]) << 3) | UInt32(raw[5] >> 5))
-            let headerLen = (raw[1] & 0x01) == 0 ? 9 : 7  // with or without CRC
-            if frameLen > headerLen && frameLen <= raw.count {
-                raw = raw.subdata(in: headerLen..<frameLen)
-                print("[Capture] stripped ADTS header, raw AAC size: \(raw.count)")
-            }
-        }
+        // Send raw bytes as-is — includes ADTS header if AVAudioConverter adds one
+        // Receiver uses same format settings so it can decode directly
+        let raw = Data(bytes: outputBuffer.data, count: Int(outputBuffer.byteLength))
         DispatchQueue.main.async { self.delegate?.capture(self, didEncodeAudio: raw) }
     }
 }
