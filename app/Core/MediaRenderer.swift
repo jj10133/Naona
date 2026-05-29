@@ -16,7 +16,8 @@ final class MediaRenderer {
     var aacSampleRate: Double = 44100
     var aacChannels:   UInt32 = 2
 
-    private let displayLayer   = AVSampleBufferDisplayLayer()
+    private let displayLayer    = AVSampleBufferDisplayLayer()
+    private let renderSync      = AVSampleBufferRenderSynchronizer()
 
 
     private var sps: Data?
@@ -29,15 +30,9 @@ final class MediaRenderer {
         displayLayer.videoGravity    = .resizeAspectFill
         displayLayer.backgroundColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
 
-        // Set a timebase so the layer knows when to display frames
-        var timebase: CMTimebase?
-        CMTimebaseCreateWithSourceClock(allocator: nil,
-            sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
-        if let timebase {
-            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
-            CMTimebaseSetRate(timebase, rate: 1.0)
-            displayLayer.controlTimebase = timebase
-        }
+        // Wire renderer to synchronizer and start playback at rate 1
+        renderSync.addRenderer(displayLayer.sampleBufferRenderer)
+        renderSync.rate = 1.0
         _setupAudio()  // AudioFileStream + AudioQueue
     }
 
@@ -54,9 +49,9 @@ final class MediaRenderer {
     }
 
     func stop() {
-        if let q = audioQueue { AudioQueueStop(q, true); AudioQueueDispose(q, true) }
-        if let s = audioFileStream { AudioFileStreamClose(s) }
-        audioQueue = nil; audioFileStream = nil; audioStarted = false
+        playerNode.stop()
+        audioEngine.stop()
+        audioConverter = nil
     }
 
     // MARK: - Video
@@ -149,28 +144,29 @@ final class MediaRenderer {
     private func _enqueue(_ nal: Data, isIDR: Bool) {
         guard let fmt = videoFormat else { return }
 
-        let lenBE = UInt32(nal.count).bigEndian
-        var avcc  = withUnsafeBytes(of: lenBE) { Data($0) }
-        avcc.append(nal)
+        // Prepend 4-byte AVCC length then NAL bytes
+        let totalLen = 4 + nal.count
+        // malloc so CMBlockBuffer owns lifetime — avoids use-after-free on local Data
+        guard let mem = malloc(totalLen) else { return }
+        var lenBE = UInt32(nal.count).bigEndian
+        memcpy(mem, &lenBE, 4)
+        nal.withUnsafeBytes { memcpy(mem.advanced(by: 4), $0.baseAddress!, nal.count) }
 
-        var copy  = avcc
         var block: CMBlockBuffer?
-        let len   = copy.count
-        copy.withUnsafeMutableBytes { ptr in
-            CMBlockBufferCreateWithMemoryBlock(
-                allocator: nil, memoryBlock: ptr.baseAddress,
-                blockLength: len, blockAllocator: kCFAllocatorNull,
-                customBlockSource: nil, offsetToData: 0, dataLength: len,
-                flags: 0, blockBufferOut: &block)
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: nil, memoryBlock: mem,
+            blockLength: totalLen, blockAllocator: kCFAllocatorMalloc,
+            customBlockSource: nil, offsetToData: 0, dataLength: totalLen,
+            flags: 0, blockBufferOut: &block) == noErr, let block else {
+            free(mem); return
         }
-        guard let block else { return }
 
         let now    = CMClockGetTime(CMClockGetHostTimeClock())
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 30),
             presentationTimeStamp: now,
             decodeTimeStamp: .invalid)
-        var size   = len
+        var size   = totalLen
         var sample: CMSampleBuffer?
         guard CMSampleBufferCreate(
             allocator: nil, dataBuffer: block, dataReady: true,
@@ -180,7 +176,6 @@ final class MediaRenderer {
             sampleSizeEntryCount: 1, sampleSizeArray: &size,
             sampleBufferOut: &sample) == noErr, let sample else { return }
 
-        // Mark display immediately
         if let atts = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
            CFArrayGetCount(atts) > 0 {
             let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
@@ -191,73 +186,116 @@ final class MediaRenderer {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.displayLayer.status == .failed { self.displayLayer.flush() }
-            if self.displayLayer.isReadyForMoreMediaData {
-                self.displayLayer.enqueue(sample)
+            let renderer = self.displayLayer.sampleBufferRenderer
+            if renderer.status == .failed { renderer.flush() }
+            if renderer.isReadyForMoreMediaData {
+                renderer.enqueue(sample)
+            } else {
+                print("[Renderer] layer not ready status:\(renderer.status.rawValue)")
             }
         }
     }
 
-    // MARK: - Audio (AudioFileStream handles ADTS parsing automatically)
+    // MARK: - Audio
 
-    private var audioFileStream: AudioFileStreamID?
-    private var audioQueue:      AudioQueueRef?
-    private var audioStarted     = false
+    private var audioEngine    = AVAudioEngine()
+    private var playerNode     = AVAudioPlayerNode()
+    private var audioConverter: AVAudioConverter?
+    private var audioSetupDone = false
 
     private func _setupAudio() {
-        // Use AudioQueue directly — bypasses AVAudioConverter ADTS issues entirely
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        AudioFileStreamOpen(selfPtr, { userData, _, propertyID, _ in
-            let me = Unmanaged<MediaRenderer>.fromOpaque(userData).takeUnretainedValue()
-            me._audioStreamProperty(propertyID)
-        }, { userData, numBytes, numPackets, inputData, packetDescs in
-            let me = Unmanaged<MediaRenderer>.fromOpaque(userData).takeUnretainedValue()
-            me._audioPackets(numBytes: numBytes, numPackets: numPackets,
-                             inputData: inputData, packetDescs: packetDescs)
-        }, kAudioFileAAC_ADTSType, &audioFileStream)
-    }
-
-    private func _audioStreamProperty(_ propertyID: AudioFileStreamPropertyID) {
-        print("[Audio] stream property: \(propertyID)")
-        guard propertyID == kAudioFileStreamProperty_ReadyToProducePackets,
-              let stream = audioFileStream else { return }
-
-        var asbd     = AudioStreamBasicDescription()
-        var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        AudioFileStreamGetProperty(stream, kAudioFileStreamProperty_DataFormat,
-                                   &asbdSize, &asbd)
-
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        AudioQueueNewOutput(&asbd, { _, queue, buffer in
-            AudioQueueFreeBuffer(queue, buffer)
-        }, selfPtr, nil, nil, 0, &audioQueue)
-
-        if let queue = audioQueue {
-            AudioQueueStart(queue, nil)
-            audioStarted = true
-            print("[Audio] AudioQueue started sr:\(asbd.mSampleRate) ch:\(asbd.mChannelsPerFrame)")
-        } else {
-            print("[Audio] AudioQueue creation FAILED")
-        }
-    }
-
-    private func _audioPackets(numBytes: UInt32, numPackets: UInt32,
-                                inputData: UnsafeRawPointer,
-                                packetDescs: UnsafeMutablePointer<AudioStreamPacketDescription>?) {
-        guard let queue = audioQueue, audioStarted else { return }
-        var buffer: AudioQueueBufferRef?
-        guard AudioQueueAllocateBuffer(queue, numBytes, &buffer) == noErr,
-              let buf = buffer else { return }
-        memcpy(buf.pointee.mAudioData, inputData, Int(numBytes))
-        buf.pointee.mAudioDataByteSize = numBytes
-        AudioQueueEnqueueBuffer(queue, buf, numPackets, packetDescs)
+        let outputFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                      sampleRate: 44100, channels: 2, interleaved: false)!
+        audioEngine.attach(playerNode)
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: outputFmt)
+        try? audioEngine.start()
+        playerNode.play()
+        print("[Audio] engine started")
     }
 
     private func _decodeAudio(_ data: Data) {
-        guard let stream = audioFileStream else { return }
-        data.withUnsafeBytes { ptr in
-            AudioFileStreamParseBytes(stream, UInt32(data.count),
-                                      ptr.baseAddress!, [])
+        let bytes = [UInt8](data)
+        guard bytes.count > 7 else { return }
+
+        // Parse ADTS header to get actual channel count and sample rate
+        // ADTS sync: 0xFFF in first 12 bits
+        guard bytes[0] == 0xFF && (bytes[1] & 0xF0) == 0xF0 else {
+            print("[Audio] not ADTS: \(bytes[0]) \(bytes[1])"); return
+        }
+
+        // Extract channel config from ADTS header bits
+        // byte2: [2:profile][4:sampleRateIdx][1:privateBit][1:channelHigh]
+        // byte3: [2:channelLow][1:originality][1:home][1:copyBit][1:copyStart][13:frameLength high]
+        let sampleRateIdx = Int((bytes[2] >> 2) & 0x0F)
+        let channelConf   = Int(((bytes[2] & 0x01) << 2) | ((bytes[3] >> 6) & 0x03))
+        let hasCRC        = (bytes[1] & 0x01) == 0
+        let headerLen     = hasCRC ? 9 : 7
+
+        let sampleRates   = [96000.0, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+                              16000, 12000, 11025, 8000, 7350]
+        guard sampleRateIdx < sampleRates.count, channelConf > 0 else {
+            print("[Audio] bad ADTS header sr:\(sampleRateIdx) ch:\(channelConf)"); return
+        }
+        let sr = sampleRates[sampleRateIdx]
+        let ch = channelConf > 6 ? 8 : channelConf // channel_config maps directly to count
+
+        // Build converter lazily or rebuild if format changed
+        if audioConverter == nil ||
+           audioConverter!.inputFormat.sampleRate != sr ||
+           audioConverter!.inputFormat.channelCount != AVAudioChannelCount(ch) {
+
+            let aacSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sr,
+                AVNumberOfChannelsKey: ch
+            ]
+            let outputFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                          sampleRate: sr,
+                                          channels: AVAudioChannelCount(ch),
+                                          interleaved: false)!
+            guard let inputFmt = AVAudioFormat(settings: aacSettings) else {
+                print("[Audio] bad input format"); return
+            }
+            audioConverter = AVAudioConverter(from: inputFmt, to: outputFmt)
+            // Reconnect engine with correct format
+            audioEngine.stop()
+            audioEngine.disconnectNodeOutput(playerNode)
+            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: outputFmt)
+            try? audioEngine.start()
+            playerNode.play()
+            print("[Audio] converter built sr:\(sr) ch:\(ch)")
+        }
+
+        guard let converter = audioConverter else { return }
+
+        // Strip ADTS header, feed raw AAC to converter
+        guard data.count > headerLen else { return }
+        let rawAAC = data.subdata(in: headerLen..<data.count)
+
+        let inputFmt = converter.inputFormat
+        let inputBuf = AVAudioCompressedBuffer(format: inputFmt,
+                                               packetCapacity: 1,
+                                               maximumPacketSize: rawAAC.count)
+        inputBuf.packetCount = 1
+        inputBuf.byteLength  = UInt32(rawAAC.count)
+        rawAAC.withUnsafeBytes { memcpy(inputBuf.data, $0.baseAddress!, rawAAC.count) }
+        inputBuf.packetDescriptions?[0] = AudioStreamPacketDescription(
+            mStartOffset: 0, mVariableFramesInPacket: 0,
+            mDataByteSize: UInt32(rawAAC.count))
+
+        let frameCount = AVAudioFrameCount(inputFmt.sampleRate * 0.025) // ~25ms
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: converter.outputFormat,
+                                             frameCapacity: frameCount) else { return }
+        var convErr: NSError?
+        var inputDone = false
+        let status = converter.convert(to: outBuf, error: &convErr) { _, outStatus in
+            if inputDone { outStatus.pointee = .noDataNow; return nil }
+            inputDone = true
+            outStatus.pointee = .haveData
+            return inputBuf
+        }
+        if status != .error && outBuf.frameLength > 0 {
+            playerNode.scheduleBuffer(outBuf)
         }
     }
 }
